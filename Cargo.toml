@@ -1,6 +1,6 @@
 [package]
 name = "pq-tls-kx-check"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -8,6 +8,9 @@ chrono = "0.4"
 rustls = "0.23.36"
 webpki-roots = "1.0.5"
 ureq = { version = "2", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2"
+indicatif = "0.17"
 x509-parser = "0.16"
 ipnet = "2"
