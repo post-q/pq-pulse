@@ -157,9 +157,9 @@ fn run_list(
 }
 
 fn usage() -> ! {
-    eprintln!("usage: pq-tls-kx-check [--format text|json] <domain>");
+    eprintln!("usage: pq-pulse [--format text|json] <domain>");
     eprintln!(
-        "       pq-tls-kx-check --list <list-file> <output-file> [--format text|json] [--no-progress]"
+        "       pq-pulse --list <list-file> <output-file> [--format text|json] [--no-progress]"
     );
     eprintln!("       (--json is shorthand for --format json)");
     exit(2)

@@ -303,15 +303,15 @@ impl TlsFacts {
 }
 
 #[derive(Debug, Clone)]
-pub struct Attribution {
+pub struct Signals {
     pub vendor: Option<Vendor>,
     pub confidence: Confidence,
     pub signal_count: usize,
     pub class_count: usize,
 }
 
-impl Attribution {
-    pub fn from_signals(signals: &[Signal]) -> Self {
+impl Signals {
+    pub fn aggregate(signals: &[Signal]) -> Self {
         let vendor = determine_vendor(signals);
         let class_count = signals
             .iter()
@@ -328,7 +328,7 @@ impl Attribution {
 }
 
 /// The state produced by checking one domain: raw evidence,
-/// attribution and verdict. Presentation-free.
+/// per-scope signal aggregates and verdict. Presentation-free.
 #[derive(Debug, Clone)]
 pub struct DomainReport {
     pub domain: String,
@@ -336,8 +336,8 @@ pub struct DomainReport {
     pub resolved_ip: Option<IpAddr>,
     pub tls: TlsFacts,
     pub evidence: Evidence,
-    pub infra: Attribution,
-    pub edge: Attribution,
+    pub infra: Signals,
+    pub edge: Signals,
     pub verdict: Verdict,
 }
 
@@ -351,8 +351,8 @@ impl DomainReport {
     ) -> Self {
         let signals = evidence.signals();
         let edge_signals = filter_edge_signals(&signals);
-        let infra = Attribution::from_signals(&signals);
-        let edge = Attribution::from_signals(&edge_signals);
+        let infra = Signals::aggregate(&signals);
+        let edge = Signals::aggregate(&edge_signals);
         let verdict = verdict_of(edge.vendor, infra.vendor, tls.is_pq());
         Self {
             domain,
@@ -368,7 +368,7 @@ impl DomainReport {
 }
 
 /// Group signals into evidence classes per vendor, then count classes.
-/// Returns the vendor with max agreeing classes, if attribution is possible.
+/// Returns the vendor with max agreeing classes, if aggregation is possible.
 pub fn determine_vendor(signals: &[Signal]) -> Option<Vendor> {
     if signals.is_empty() {
         return None;
@@ -398,7 +398,7 @@ pub fn determine_vendor(signals: &[Signal]) -> Option<Vendor> {
     }
 }
 
-/// For cloud providers, only CNAME and CERT signals qualify for edge attribution.
+/// For cloud providers, only CNAME and CERT signals qualify as edge signals.
 /// PTR and RDAP prove infrastructure ownership, not TLS termination.
 pub fn filter_edge_signals(signals: &[Signal]) -> Vec<Signal> {
     signals
@@ -498,11 +498,11 @@ mod tests {
                 vendor: Vendor::Akamai,
             },
         ];
-        let attribution = Attribution::from_signals(&signals);
-        assert_eq!(attribution.vendor, Some(Vendor::Akamai));
-        assert_eq!(attribution.confidence, Confidence::Probable);
-        assert_eq!(attribution.signal_count, 2);
-        assert_eq!(attribution.class_count, 1);
+        let aggregate = Signals::aggregate(&signals);
+        assert_eq!(aggregate.vendor, Some(Vendor::Akamai));
+        assert_eq!(aggregate.confidence, Confidence::Probable);
+        assert_eq!(aggregate.signal_count, 2);
+        assert_eq!(aggregate.class_count, 1);
     }
 
     #[test]
@@ -532,9 +532,9 @@ mod tests {
                 vendor: Vendor::Cloudflare,
             },
         ];
-        let attribution = Attribution::from_signals(&signals);
-        assert_eq!(attribution.vendor, Some(Vendor::Cloudflare));
-        assert_eq!(attribution.confidence, Confidence::Confirmed);
+        let aggregate = Signals::aggregate(&signals);
+        assert_eq!(aggregate.vendor, Some(Vendor::Cloudflare));
+        assert_eq!(aggregate.confidence, Confidence::Confirmed);
     }
 
     #[test]

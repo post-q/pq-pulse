@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use super::Renderer;
-use crate::model::{Attribution, DomainReport, SignalType};
+use crate::model::{DomainReport, SignalType, Signals};
 
 /// JSON presentation. `value` is the raw observation for each of the five
 /// evidence slots, `vendor` the interpretation — a slot is a signal
@@ -33,7 +33,7 @@ struct AggregateDto<'a> {
 }
 
 #[derive(Serialize)]
-struct AttributionDto<'a> {
+struct SignalsDto<'a> {
     infra: AggregateDto<'a>,
     edge: AggregateDto<'a>,
 }
@@ -46,7 +46,7 @@ struct ReportDto<'a> {
     resolved_ip: Option<String>,
     tls: TlsDto<'a>,
     evidence: Vec<SignalDto<'a>>,
-    attribution: AttributionDto<'a>,
+    signals: SignalsDto<'a>,
     verdict: &'a str,
 }
 
@@ -71,7 +71,7 @@ impl JsonRenderer {
                 pq: report.tls.is_pq(),
             },
             evidence: Self::signal_dtos(report),
-            attribution: AttributionDto {
+            signals: SignalsDto {
                 infra: Self::aggregate_dto(&report.infra),
                 edge: Self::aggregate_dto(&report.edge),
             },
@@ -79,12 +79,12 @@ impl JsonRenderer {
         }
     }
 
-    fn aggregate_dto(attribution: &Attribution) -> AggregateDto<'_> {
+    fn aggregate_dto(signals: &Signals) -> AggregateDto<'_> {
         AggregateDto {
-            vendor: attribution.vendor.map(|v| v.as_str()),
-            confidence: attribution.confidence.as_str(),
-            signal_count: attribution.signal_count,
-            class_count: attribution.class_count,
+            vendor: signals.vendor.map(|v| v.as_str()),
+            confidence: signals.confidence.as_str(),
+            signal_count: signals.signal_count,
+            class_count: signals.class_count,
         }
     }
 
@@ -193,9 +193,9 @@ mod tests {
         assert_eq!(signals[4]["value"], "AKAMAI");
         assert_eq!(signals[4]["vendor"], "Akamai");
 
-        assert_eq!(value["attribution"]["infra"]["vendor"], "Akamai");
-        assert_eq!(value["attribution"]["infra"]["confidence"], "probable");
-        assert_eq!(value["attribution"]["edge"]["class_count"], 1);
+        assert_eq!(value["signals"]["infra"]["vendor"], "Akamai");
+        assert_eq!(value["signals"]["infra"]["confidence"], "probable");
+        assert_eq!(value["signals"]["edge"]["class_count"], 1);
         assert_eq!(value["verdict"], "no_pq_edge");
     }
 

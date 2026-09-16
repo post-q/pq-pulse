@@ -1,5 +1,5 @@
 [package]
-name = "pq-tls-kx-check"
+name = "pq-pulse"
 version = "0.3.0"
 edition = "2024"
 

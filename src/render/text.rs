@@ -1,5 +1,5 @@
 use super::Renderer;
-use crate::model::{Attribution, DomainReport, SignalType, Vendor};
+use crate::model::{DomainReport, SignalType, Signals, Vendor};
 
 /// Human-readable presentation. Mirrors the JSON semantics:
 /// the value is the raw observation, `-> Vendor` marks a signal,
@@ -64,9 +64,9 @@ impl Renderer for TextRenderer {
                 e.rdap.as_ref().and_then(|r| r.vendor),
             ),
             String::new(),
-            "attribution:".to_string(),
-            attribution_line("infra:", &report.infra),
-            attribution_line("edge:", &report.edge),
+            "signals:".to_string(),
+            signals_line("infra:", &report.infra),
+            signals_line("edge:", &report.edge),
             String::new(),
             field("verdict:", &report.verdict.to_string()),
         ];
@@ -90,11 +90,11 @@ fn evidence_line(kind: &str, value: Option<&str>, vendor: Option<Vendor>) -> Str
     }
 }
 
-fn attribution_line(label: &str, attribution: &Attribution) -> String {
-    let vendor = attribution.vendor.map(|v| v.as_str()).unwrap_or("(none)");
+fn signals_line(label: &str, signals: &Signals) -> String {
+    let vendor = signals.vendor.map(|v| v.as_str()).unwrap_or("(none)");
     format!(
         "  {label:<7}{vendor} (signals: {}, classes: {}, confidence: {})",
-        attribution.signal_count, attribution.class_count, attribution.confidence,
+        signals.signal_count, signals.class_count, signals.confidence,
     )
 }
 
@@ -118,7 +118,7 @@ mod tests {
             "  CERT  www.citi.com",
             "  PTR   a104-96-178-165.deploy.static.akamaitechnologies.com -> Akamai",
             "  RDAP  AKAMAI -> Akamai",
-            "attribution:",
+            "signals:",
             "  infra: Akamai (signals: 2, classes: 1, confidence: probable)",
             "  edge:  Akamai (signals: 2, classes: 1, confidence: probable)",
             "verdict:       no_pq_edge (classical key exchange, TLS terminated by an identified edge vendor)",
