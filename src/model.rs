@@ -161,9 +161,11 @@ impl std::fmt::Display for Confidence {
 pub enum Verdict {
     PqAtEdge,
     PqCloudHosted,
+    PqVendorHosted,
     PqOwnInfra,
     NoPqEdge,
     NoPqCloudHosted,
+    NoPqVendorHosted,
     NoPqOwnInfra,
 }
 
@@ -172,9 +174,11 @@ impl Verdict {
         match self {
             Verdict::PqAtEdge => "pq_at_edge",
             Verdict::PqCloudHosted => "pq_cloud_hosted",
+            Verdict::PqVendorHosted => "pq_vendor_hosted",
             Verdict::PqOwnInfra => "pq_own_infra",
             Verdict::NoPqEdge => "no_pq_edge",
             Verdict::NoPqCloudHosted => "no_pq_cloud_hosted",
+            Verdict::NoPqVendorHosted => "no_pq_vendor_hosted",
             Verdict::NoPqOwnInfra => "no_pq_own_infra",
         }
     }
@@ -182,19 +186,29 @@ impl Verdict {
     pub const fn explanation(&self) -> &'static str {
         match self {
             Verdict::PqAtEdge => {
-                "post-quantum key exchange, TLS terminated by an identified edge vendor"
+                "The public connection terminates at an identified edge/CDN/security provider, where post-quantum or hybrid key exchange is enabled."
             }
             Verdict::PqCloudHosted => {
-                "post-quantum key exchange, hosted on cloud infrastructure (no edge vendor)"
+                "The service is hosted on infrastructure attributed to a public cloud provider, with post-quantum or hybrid key exchange enabled."
             }
-            Verdict::PqOwnInfra => "post-quantum key exchange, own or unattributed infrastructure",
+            Verdict::PqVendorHosted => {
+                "The service is hosted on infrastructure attributed to a third-party provider, with post-quantum or hybrid key exchange enabled."
+            }
+            Verdict::PqOwnInfra => {
+                "The service appears to terminate on infrastructure operated by the organization, with post-quantum or hybrid key exchange enabled."
+            }
             Verdict::NoPqEdge => {
-                "classical key exchange, TLS terminated by an identified edge vendor"
+                "The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed."
             }
             Verdict::NoPqCloudHosted => {
-                "classical key exchange, hosted on cloud infrastructure (no edge vendor)"
+                "The service is hosted on infrastructure attributed to a public cloud provider, but no post-quantum key exchange was observed."
             }
-            Verdict::NoPqOwnInfra => "classical key exchange, own or unattributed infrastructure",
+            Verdict::NoPqVendorHosted => {
+                "The service is hosted on infrastructure attributed to a third-party provider, but no post-quantum key exchange was observed."
+            }
+            Verdict::NoPqOwnInfra => {
+                "The service appears to terminate on infrastructure operated by the organization, but no post-quantum key exchange was observed."
+            }
         }
     }
 }
@@ -240,6 +254,17 @@ pub struct PtrEvidence {
 pub struct RdapEvidence {
     pub netname: String,
     pub vendor: Option<Vendor>,
+}
+
+/// Who operates the resolved infrastructure, as far as the raw evidence
+/// says: `Own` when the CNAME/PTR stay inside the domain's registrable
+/// zone or the RDAP netname names the same operator, `ThirdParty` when
+/// they point into someone else's zone, `Unknown` when it cannot tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfraOwnership {
+    Own,
+    ThirdParty,
+    Unknown,
 }
 
 /// The five raw observation slots; a slot becomes a signal
@@ -288,6 +313,87 @@ impl Evidence {
         }
         signals
     }
+
+    /// Ownership of the resolved infrastructure, independent of vendor
+    /// matching: a PTR or CNAME inside the domain's own registrable zone
+    /// (or an RDAP netname naming the registrable label) means own
+    /// infrastructure; one inside a different registrable zone means the
+    /// host belongs to some third party, known vendor or not.
+    pub fn infra_ownership(&self, domain: &str) -> InfraOwnership {
+        let Some(zone) = registrable_zone(domain) else {
+            return InfraOwnership::Unknown;
+        };
+        let dns_refs = [
+            self.cname.as_ref().map(|c| c.target.as_str()),
+            self.ptr.as_ref().map(|p| p.record.as_str()),
+        ];
+        if dns_refs.iter().flatten().any(|r| in_zone(r, &zone)) {
+            return InfraOwnership::Own;
+        }
+        if dns_refs
+            .iter()
+            .flatten()
+            .any(|r| registrable_zone(r).is_some_and(|foreign| foreign != zone))
+        {
+            return InfraOwnership::ThirdParty;
+        }
+        if self
+            .rdap
+            .as_ref()
+            .is_some_and(|r| names_operator(&r.netname, &zone))
+        {
+            return InfraOwnership::Own;
+        }
+        InfraOwnership::Unknown
+    }
+}
+
+/// Trailing label pairs that act as public suffixes in their own right,
+/// pushing the registrable label one position further left.
+const SECOND_LEVEL_SUFFIXES: &[&str] = &[
+    "com.pl", "net.pl", "org.pl", "edu.pl", "gov.pl", "info.pl", "waw.pl", "co.uk", "org.uk",
+    "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz", "co.jp", "co.kr", "co.za", "com.br",
+    "com.cn", "com.tr", "com.mx",
+];
+
+/// The registrable zone of a DNS name ("nbp.pl" for "e-zamowienia.nbp.pl"),
+/// or None when the name is too short to hold one.
+fn registrable_zone(name: &str) -> Option<String> {
+    let lowered = name.trim_end_matches('.').to_lowercase();
+    let labels: Vec<&str> = lowered
+        .split('.')
+        .filter(|label| !label.is_empty())
+        .collect();
+    let suffix2 = labels
+        .len()
+        .checked_sub(2)
+        .map(|i| labels[i..].join("."))
+        .unwrap_or_default();
+    let take = if labels.len() >= 3 && SECOND_LEVEL_SUFFIXES.contains(&suffix2.as_str()) {
+        3
+    } else {
+        2
+    };
+    (labels.len() >= take).then(|| labels[labels.len() - take..].join("."))
+}
+
+/// True when `name` equals `zone` or lies inside it.
+fn in_zone(name: &str, zone: &str) -> bool {
+    let name = name.trim_end_matches('.').to_lowercase();
+    name == zone || name.ends_with(&format!(".{zone}"))
+}
+
+/// True when a netname-style string ("PL-MBANKPL") contains the zone's
+/// registrable label ("mbank") as a whole token.
+fn names_operator(netname: &str, zone: &str) -> bool {
+    let Some(label) = zone.split('.').next() else {
+        return false;
+    };
+    let label = label.to_uppercase();
+    netname
+        .to_uppercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|token| token == label)
 }
 
 #[derive(Debug, Clone)]
@@ -353,7 +459,8 @@ impl DomainReport {
         let edge_signals = filter_edge_signals(&signals);
         let infra = Signals::aggregate(&signals);
         let edge = Signals::aggregate(&edge_signals);
-        let verdict = verdict_of(edge.vendor, infra.vendor, tls.is_pq());
+        let ownership = evidence.infra_ownership(&domain);
+        let verdict = verdict_of(edge.vendor, infra.vendor, tls.is_pq(), ownership);
         Self {
             domain,
             checked_at,
@@ -417,13 +524,22 @@ pub fn confidence_of(vendor: Option<Vendor>, class_count: usize) -> Confidence {
     }
 }
 
-pub fn verdict_of(edge: Option<Vendor>, infra: Option<Vendor>, pq: bool) -> Verdict {
+pub fn verdict_of(
+    edge: Option<Vendor>,
+    infra: Option<Vendor>,
+    pq: bool,
+    ownership: InfraOwnership,
+) -> Verdict {
     match (edge, infra, pq) {
         (Some(_), _, true) => Verdict::PqAtEdge,
         (None, Some(vendor), true) if vendor.is_cloud() => Verdict::PqCloudHosted,
+        (None, Some(_), true) => Verdict::PqVendorHosted,
+        (None, _, true) if ownership == InfraOwnership::ThirdParty => Verdict::PqVendorHosted,
         (None, _, true) => Verdict::PqOwnInfra,
         (Some(_), _, false) => Verdict::NoPqEdge,
         (None, Some(vendor), false) if vendor.is_cloud() => Verdict::NoPqCloudHosted,
+        (None, Some(_), false) => Verdict::NoPqVendorHosted,
+        (None, _, false) if ownership == InfraOwnership::ThirdParty => Verdict::NoPqVendorHosted,
         (None, _, false) => Verdict::NoPqOwnInfra,
     }
 }
@@ -557,22 +673,178 @@ mod tests {
     #[test]
     fn verdicts_follow_edge_and_pq() {
         assert_eq!(
-            verdict_of(Some(Vendor::Akamai), None, true),
+            verdict_of(Some(Vendor::Akamai), None, true, InfraOwnership::Unknown),
             Verdict::PqAtEdge
         );
         assert_eq!(
-            verdict_of(None, Some(Vendor::Azure), true),
+            verdict_of(None, Some(Vendor::Azure), true, InfraOwnership::Unknown),
             Verdict::PqCloudHosted
         );
         assert_eq!(
-            verdict_of(None, Some(Vendor::Akamai), true),
+            verdict_of(None, Some(Vendor::Akamai), true, InfraOwnership::Unknown),
+            Verdict::PqVendorHosted
+        );
+        assert_eq!(
+            verdict_of(None, None, true, InfraOwnership::ThirdParty),
+            Verdict::PqVendorHosted
+        );
+        assert_eq!(
+            verdict_of(None, None, true, InfraOwnership::Own),
             Verdict::PqOwnInfra
         );
         assert_eq!(
-            verdict_of(None, Some(Vendor::Azure), false),
+            verdict_of(None, Some(Vendor::Azure), false, InfraOwnership::Unknown),
             Verdict::NoPqCloudHosted
         );
-        assert_eq!(verdict_of(None, None, false), Verdict::NoPqOwnInfra);
+        assert_eq!(
+            verdict_of(None, Some(Vendor::Link11), false, InfraOwnership::Unknown),
+            Verdict::NoPqVendorHosted
+        );
+        assert_eq!(
+            verdict_of(None, None, false, InfraOwnership::ThirdParty),
+            Verdict::NoPqVendorHosted
+        );
+        assert_eq!(
+            verdict_of(None, None, false, InfraOwnership::Unknown),
+            Verdict::NoPqOwnInfra
+        );
+    }
+
+    #[test]
+    fn foreign_infra_is_vendor_hosted_not_own() {
+        let evidence = Evidence {
+            cert: Some(CertEvidence {
+                name: "e-zamowienia.nbp.pl".to_string(),
+                vendor: None,
+            }),
+            ptr: Some(PtrEvidence {
+                record: "195.205.148.130.marketplanet.pl".to_string(),
+                vendor: None,
+            }),
+            rdap: Some(RdapEvidence {
+                netname: "OTWARTY-RYNEK-ELEKTRONICZNY".to_string(),
+                vendor: None,
+            }),
+            ..Default::default()
+        };
+        let report = DomainReport::build(
+            "e-zamowienia.nbp.pl".to_string(),
+            Some("195.205.148.130".parse().unwrap()),
+            TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: SymmetricAlg::Aes128,
+            },
+            evidence,
+            Local::now(),
+        );
+        assert_eq!(report.verdict, Verdict::NoPqVendorHosted);
+    }
+
+    #[test]
+    fn same_zone_infra_stays_own() {
+        let evidence = Evidence {
+            ptr: Some(PtrEvidence {
+                record: "online.bankmillennium.pl".to_string(),
+                vendor: None,
+            }),
+            rdap: Some(RdapEvidence {
+                netname: "BBG-PL".to_string(),
+                vendor: None,
+            }),
+            ..Default::default()
+        };
+        let report = DomainReport::build(
+            "online.bankmillennium.pl".to_string(),
+            Some("193.201.167.52".parse().unwrap()),
+            TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: SymmetricAlg::Aes256,
+            },
+            evidence,
+            Local::now(),
+        );
+        assert_eq!(report.verdict, Verdict::NoPqOwnInfra);
+    }
+
+    #[test]
+    fn infra_ownership_tracks_zones_and_netnames() {
+        let evidence = |cname: Option<&str>, ptr: Option<&str>, rdap: Option<&str>| Evidence {
+            cname: cname.map(|t| CnameEvidence {
+                target: t.to_string(),
+                vendor: None,
+            }),
+            ptr: ptr.map(|r| PtrEvidence {
+                record: r.to_string(),
+                vendor: None,
+            }),
+            rdap: rdap.map(|n| RdapEvidence {
+                netname: n.to_string(),
+                vendor: None,
+            }),
+            ..Default::default()
+        };
+        // PTR inside the domain's own zone.
+        assert_eq!(
+            evidence(None, Some("online.bankmillennium.pl"), Some("BBG-PL"))
+                .infra_ownership("online.bankmillennium.pl"),
+            InfraOwnership::Own
+        );
+        // RDAP netname naming the registrable label.
+        assert_eq!(
+            evidence(None, None, Some("ZUS")).infra_ownership("www.zus.pl"),
+            InfraOwnership::Own
+        );
+        // CNAME delegation to another zone of the same operator.
+        assert_eq!(
+            evidence(Some("online.global.mbank.pl"), None, Some("PL-MBANKPL"))
+                .infra_ownership("online.mbank.pl"),
+            InfraOwnership::Own
+        );
+        // PTR in a foreign zone.
+        assert_eq!(
+            evidence(None, Some("195.205.148.130.marketplanet.pl"), None)
+                .infra_ownership("e-zamowienia.nbp.pl"),
+            InfraOwnership::ThirdParty
+        );
+        // CNAME into a foreign zone.
+        assert_eq!(
+            evidence(Some("fe.edelivery.sni.certum.pl"), None, None)
+                .infra_ownership("erds.envelo.pl"),
+            InfraOwnership::ThirdParty
+        );
+        // Netname that does not echo the registrable label proves nothing.
+        assert_eq!(
+            evidence(None, None, Some("PL-PKOBP")).infra_ownership("ipko.pl"),
+            InfraOwnership::Unknown
+        );
+        // No infra evidence at all.
+        assert_eq!(
+            evidence(None, None, None).infra_ownership("example.com"),
+            InfraOwnership::Unknown
+        );
+    }
+
+    #[test]
+    fn registrable_zone_handles_two_level_suffixes() {
+        assert_eq!(
+            registrable_zone("e-zamowienia.nbp.pl").as_deref(),
+            Some("nbp.pl")
+        );
+        assert_eq!(
+            registrable_zone("online.bankmillennium.pl.").as_deref(),
+            Some("bankmillennium.pl")
+        );
+        assert_eq!(registrable_zone("nbp.pl").as_deref(), Some("nbp.pl"));
+        assert_eq!(
+            registrable_zone("www.foo.co.uk").as_deref(),
+            Some("foo.co.uk")
+        );
+        assert_eq!(
+            registrable_zone("pacjent.gov.pl").as_deref(),
+            Some("pacjent.gov.pl")
+        );
+        assert_eq!(registrable_zone("pl").as_deref(), None);
+        assert_eq!(registrable_zone("localhost").as_deref(), None);
     }
 
     #[test]

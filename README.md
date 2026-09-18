@@ -32,14 +32,16 @@ tolerated.
   (who terminates TLS). Cloud PTR/RDAP proves hosting, not edge termination.
   Two agreeing evidence classes = `confirmed`, one = `probable`
 
-| verdict | meaning |
+| verdict | description |
 | --- | --- |
-| `pq_at_edge` | post-quantum key exchange, TLS terminated by an identified edge vendor |
-| `pq_cloud_hosted` | post-quantum key exchange, hosted on cloud infrastructure (no edge vendor) |
-| `pq_own_infra` | post-quantum key exchange, own or unattributed infrastructure |
-| `no_pq_edge` | classical key exchange, TLS terminated by an identified edge vendor |
-| `no_pq_cloud_hosted` | classical key exchange, hosted on cloud infrastructure (no edge vendor) |
-| `no_pq_own_infra` | classical key exchange, own or unattributed infrastructure |
+| `pq_at_edge` | The public connection terminates at an identified edge/CDN/security provider, where post-quantum or hybrid key exchange is enabled. |
+| `pq_cloud_hosted` | The service is hosted on infrastructure attributed to a public cloud provider, with post-quantum or hybrid key exchange enabled. |
+| `pq_vendor_hosted` | The service is hosted on infrastructure attributed to a third-party provider, with post-quantum or hybrid key exchange enabled. |
+| `pq_own_infra` | The service appears to terminate on infrastructure operated by the organization, with post-quantum or hybrid key exchange enabled. |
+| `no_pq_edge` | The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed. |
+| `no_pq_cloud_hosted` | The service is hosted on infrastructure attributed to a public cloud provider, but no post-quantum key exchange was observed. |
+| `no_pq_vendor_hosted` | The service is hosted on infrastructure attributed to a third-party provider, but no post-quantum key exchange was observed. |
+| `no_pq_own_infra` | The service appears to terminate on infrastructure operated by the organization, but no post-quantum key exchange was observed. |
 
 Text output (single domain):
 
@@ -60,7 +62,7 @@ signals:
   infra: Akamai (signals: 2, classes: 1, confidence: probable)
   edge:  Akamai (signals: 2, classes: 1, confidence: probable)
 
-verdict:       no_pq_edge (classical key exchange, TLS terminated by an identified edge vendor)
+verdict:       no_pq_edge (The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed.)
 ```
 
 ## Requirements

@@ -121,7 +121,7 @@ mod tests {
             "signals:",
             "  infra: Akamai (signals: 2, classes: 1, confidence: probable)",
             "  edge:  Akamai (signals: 2, classes: 1, confidence: probable)",
-            "verdict:       no_pq_edge (classical key exchange, TLS terminated by an identified edge vendor)",
+            "verdict:       no_pq_edge (The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed.)",
         ];
         for line in expected {
             assert!(text.contains(line), "missing line: {line}");
