@@ -8,7 +8,7 @@ evidence sources.
 
 ```console
 $ pq-pulse <domain>                      # text report to stdout
-$ pq-pulse --format json <domain>        # JSON document
+$ pq-pulse <domain> --json               # JSON
 $ pq-pulse --list <list-file> <out-file> # batch, one JSON record per line
 $ pq-pulse --list <list-file> <out-file> --format text --no-progress
 ```
@@ -47,7 +47,8 @@ Text output (single domain):
 
 ```
 domain:        citibankonline.pl
-resolved_ip:   104.96.178.165
+checked_at:    2026-09-21 10:32:17 +02:00
+resolved_ip:   104.94.222.171
 kx group:      X25519 (no PQ)
 symmetric_alg: AES256
 
@@ -55,12 +56,14 @@ evidence:
   CNAME (none)
   RANGE (none)
   CERT  www.citi.com
-  PTR   a104-96-178-165.deploy.static.akamaitechnologies.com -> Akamai
+  HTTP  X-Akamai-Transformed -> Akamai
+  PTR   a104-94-222-171.deploy.static.akamaitechnologies.com -> Akamai
   RDAP  AKAMAI -> Akamai
+  ASN   AS33905 AKAMAI-AMS -> Akamai
 
 signals:
-  infra: Akamai (signals: 2, classes: 1, confidence: probable)
-  edge:  Akamai (signals: 2, classes: 1, confidence: probable)
+  infra: Akamai (signals: 4, classes: 2, confidence: confirmed)
+  edge:  Akamai (signals: 4, classes: 2, confidence: confirmed)
 
 verdict:       no_pq_edge (The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed.)
 ```

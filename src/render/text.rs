@@ -14,6 +14,7 @@ impl Renderer for TextRenderer {
 
     fn document(&self, report: &DomainReport) -> String {
         let e = &report.evidence;
+        let cname_value = e.cname.as_ref().map(|c| c.chain_text());
         let lines = vec![
             field("domain:", &report.domain),
             field(
@@ -40,7 +41,7 @@ impl Renderer for TextRenderer {
             "evidence:".to_string(),
             evidence_line(
                 SignalType::Cname.as_str(),
-                e.cname.as_ref().map(|c| c.target.as_str()),
+                cname_value.as_deref(),
                 e.cname.as_ref().and_then(|c| c.vendor),
             ),
             evidence_line(
@@ -54,6 +55,11 @@ impl Renderer for TextRenderer {
                 e.cert.as_ref().and_then(|c| c.vendor),
             ),
             evidence_line(
+                SignalType::Http.as_str(),
+                e.http.as_ref().map(|h| h.header.as_str()),
+                e.http.as_ref().map(|h| h.vendor),
+            ),
+            evidence_line(
                 SignalType::Ptr.as_str(),
                 e.ptr.as_ref().map(|p| p.record.as_str()),
                 e.ptr.as_ref().and_then(|p| p.vendor),
@@ -62,6 +68,11 @@ impl Renderer for TextRenderer {
                 SignalType::Rdap.as_str(),
                 e.rdap.as_ref().map(|r| r.netname.as_str()),
                 e.rdap.as_ref().and_then(|r| r.vendor),
+            ),
+            evidence_line(
+                SignalType::Asn.as_str(),
+                e.asn.as_ref().map(|a| a.asn.as_str()),
+                e.asn.as_ref().and_then(|a| a.vendor),
             ),
             String::new(),
             "signals:".to_string(),
@@ -101,7 +112,7 @@ fn signals_line(label: &str, signals: &Signals) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::fixture;
+    use crate::model::{CnameEvidence, Evidence, SymmetricAlg, TlsFacts, Vendor, fixture};
 
     #[test]
     fn document_renders_all_slots_with_values_and_signals() {
@@ -116,11 +127,13 @@ mod tests {
             "  CNAME (none)",
             "  RANGE (none)",
             "  CERT  www.citi.com",
+            "  HTTP  X-Akamai-Request-ID -> Akamai",
             "  PTR   a104-96-178-165.deploy.static.akamaitechnologies.com -> Akamai",
             "  RDAP  AKAMAI -> Akamai",
+            "  ASN   AS20940 AKAMAI-ASN1 -> Akamai",
             "signals:",
-            "  infra: Akamai (signals: 2, classes: 1, confidence: probable)",
-            "  edge:  Akamai (signals: 2, classes: 1, confidence: probable)",
+            "  infra: Akamai (signals: 4, classes: 2, confidence: confirmed)",
+            "  edge:  Akamai (signals: 4, classes: 2, confidence: confirmed)",
             "verdict:       no_pq_edge (The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed.)",
         ];
         for line in expected {
@@ -129,6 +142,32 @@ mod tests {
         assert!(text.contains("checked_at: "));
         assert!(!text.contains("TLD:"));
         assert!(!text.ends_with('\n'));
+    }
+
+    #[test]
+    fn cname_chain_renders_as_one_value() {
+        let report = DomainReport::build(
+            "www.example.com".to_string(),
+            None,
+            TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: SymmetricAlg::Aes256,
+            },
+            Evidence {
+                cname: Some(CnameEvidence {
+                    chain: vec![
+                        "www.example.com.glb.example.org".to_string(),
+                        "www.example.com.edgekey.net".to_string(),
+                        "e970.dspg.akamaiedge.net".to_string(),
+                    ],
+                    vendor: Some(Vendor::Akamai),
+                }),
+                ..Default::default()
+            },
+            chrono::Local::now(),
+        );
+        let text = TextRenderer.document(&report);
+        assert!(text.contains("  CNAME www.example.com.glb.example.org -> www.example.com.edgekey.net -> e970.dspg.akamaiedge.net -> Akamai"));
     }
 
     #[test]

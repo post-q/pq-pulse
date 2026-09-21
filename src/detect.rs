@@ -1,5 +1,7 @@
+mod asn;
 mod cert;
 mod dns;
+mod http;
 mod ranges;
 mod rdap;
 mod tls;
@@ -12,11 +14,13 @@ use crate::model::{
     CertEvidence, CnameEvidence, DomainReport, Evidence, PtrEvidence, RangeEvidence,
 };
 
-use dns::{dig_cname, dig_ptr, resolve};
+use asn::asn_lookup;
+use dns::{dig_cname_chain, dig_ptr, resolve};
+use http::probe_http;
 use ranges::{get_vendor_ranges, ip_in_ranges};
 use rdap::rdap_lookup;
 use tls::probe;
-use vendors::{match_cname_vendor, match_vendor};
+use vendors::{match_cname_chain_vendor, match_vendor};
 
 /// Detection failures; `Display` forwards the upstream message unchanged.
 #[derive(Debug, Error)]
@@ -32,9 +36,10 @@ pub(crate) enum DetectError {
 pub(crate) fn check_domain(host: &str) -> Result<DomainReport, DetectError> {
     let resolved_ip = resolve(host);
 
-    let cname = dig_cname(host).map(|target| CnameEvidence {
-        vendor: match_cname_vendor(&target),
-        target,
+    let cname_chain = dig_cname_chain(host);
+    let cname = (!cname_chain.is_empty()).then(|| CnameEvidence {
+        vendor: match_cname_chain_vendor(&cname_chain),
+        chain: cname_chain,
     });
 
     let vendor_ranges = get_vendor_ranges();
@@ -50,6 +55,8 @@ pub(crate) fn check_domain(host: &str) -> Result<DomainReport, DetectError> {
         .and_then(cert::parse_cert_evidence)
         .map(|(vendor, name)| CertEvidence { vendor, name });
 
+    let http = probe_http(host);
+
     let ptr = resolved_ip
         .and_then(|ip| dig_ptr(&ip.to_string()))
         .map(|record| PtrEvidence {
@@ -62,6 +69,8 @@ pub(crate) fn check_domain(host: &str) -> Result<DomainReport, DetectError> {
         .as_deref()
         .and_then(rdap_lookup);
 
+    let asn = resolved_ip.and_then(asn_lookup);
+
     Ok(DomainReport::build(
         host.to_string(),
         resolved_ip,
@@ -70,8 +79,10 @@ pub(crate) fn check_domain(host: &str) -> Result<DomainReport, DetectError> {
             cname,
             range,
             cert,
+            http,
             ptr,
             rdap,
+            asn,
         },
         Local::now(),
     ))

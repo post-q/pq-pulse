@@ -49,8 +49,10 @@ pub enum SignalType {
     Cname,
     Range,
     Cert,
+    Http,
     Ptr,
     Rdap,
+    Asn,
 }
 
 impl SignalType {
@@ -59,19 +61,24 @@ impl SignalType {
             SignalType::Cname => "CNAME",
             SignalType::Range => "RANGE",
             SignalType::Cert => "CERT",
+            SignalType::Http => "HTTP",
             SignalType::Ptr => "PTR",
             SignalType::Rdap => "RDAP",
+            SignalType::Asn => "ASN",
         }
     }
 
     /// Evidence class of this signal type.
-    /// PTR and RDAP both derive from IP block ownership — counted as one class.
+    /// PTR, RDAP and ASN all derive from IP block ownership — counted
+    /// as one class. HTTP shows the request was actually processed by
+    /// the vendor edge — its own class.
     pub const fn class(&self) -> EvidenceClass {
         match self {
             SignalType::Cname => EvidenceClass::DnsDelegation,
             SignalType::Range => EvidenceClass::PublishedRange,
             SignalType::Cert => EvidenceClass::Certificate,
-            SignalType::Ptr | SignalType::Rdap => EvidenceClass::IpInfra,
+            SignalType::Http => EvidenceClass::EdgeProcessing,
+            SignalType::Ptr | SignalType::Rdap | SignalType::Asn => EvidenceClass::IpInfra,
         }
     }
 }
@@ -81,6 +88,7 @@ pub enum EvidenceClass {
     DnsDelegation,
     PublishedRange,
     Certificate,
+    EdgeProcessing,
     IpInfra,
 }
 
@@ -90,6 +98,7 @@ impl EvidenceClass {
             EvidenceClass::DnsDelegation => "dns_delegation",
             EvidenceClass::PublishedRange => "published_range",
             EvidenceClass::Certificate => "certificate",
+            EvidenceClass::EdgeProcessing => "edge_processing",
             EvidenceClass::IpInfra => "ip_infra",
         }
     }
@@ -228,8 +237,17 @@ pub struct Signal {
 
 #[derive(Debug, Clone)]
 pub struct CnameEvidence {
-    pub target: String,
+    /// The full CNAME chain in resolution order; the last hop is the
+    /// terminal target. Vendor zones are matched anywhere in the chain.
+    pub chain: Vec<String>,
     pub vendor: Option<Vendor>,
+}
+
+impl CnameEvidence {
+    /// The chain as one display value: "hop1 -> hop2 -> ...".
+    pub fn chain_text(&self) -> String {
+        self.chain.join(" -> ")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -244,6 +262,16 @@ pub struct CertEvidence {
     pub vendor: Option<Vendor>,
 }
 
+/// A vendor-specific HTTP response header observed on a live request.
+/// Exists only when a vendor actually processed the request, so the
+/// vendor is not optional here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpEvidence {
+    /// The header that produced the match, e.g. "X-Akamai-Request-ID".
+    pub header: String,
+    pub vendor: Vendor,
+}
+
 #[derive(Debug, Clone)]
 pub struct PtrEvidence {
     pub record: String,
@@ -253,6 +281,13 @@ pub struct PtrEvidence {
 #[derive(Debug, Clone)]
 pub struct RdapEvidence {
     pub netname: String,
+    pub vendor: Option<Vendor>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AsnEvidence {
+    /// Origin ASN and its name, e.g. "AS20940 AKAMAI-ASN1".
+    pub asn: String,
     pub vendor: Option<Vendor>,
 }
 
@@ -267,15 +302,17 @@ pub enum InfraOwnership {
     Unknown,
 }
 
-/// The five raw observation slots; a slot becomes a signal
+/// The seven raw observation slots; a slot becomes a signal
 /// only when it carries a vendor match.
 #[derive(Debug, Clone, Default)]
 pub struct Evidence {
     pub cname: Option<CnameEvidence>,
     pub range: Option<RangeEvidence>,
     pub cert: Option<CertEvidence>,
+    pub http: Option<HttpEvidence>,
     pub ptr: Option<PtrEvidence>,
     pub rdap: Option<RdapEvidence>,
+    pub asn: Option<AsnEvidence>,
 }
 
 impl Evidence {
@@ -299,6 +336,12 @@ impl Evidence {
                 vendor,
             });
         }
+        if let Some(http) = &self.http {
+            signals.push(Signal {
+                kind: SignalType::Http,
+                vendor: http.vendor,
+            });
+        }
         if let Some(vendor) = self.ptr.as_ref().and_then(|p| p.vendor) {
             signals.push(Signal {
                 kind: SignalType::Ptr,
@@ -308,6 +351,12 @@ impl Evidence {
         if let Some(vendor) = self.rdap.as_ref().and_then(|r| r.vendor) {
             signals.push(Signal {
                 kind: SignalType::Rdap,
+                vendor,
+            });
+        }
+        if let Some(vendor) = self.asn.as_ref().and_then(|a| a.vendor) {
+            signals.push(Signal {
+                kind: SignalType::Asn,
                 vendor,
             });
         }
@@ -324,7 +373,11 @@ impl Evidence {
             return InfraOwnership::Unknown;
         };
         let dns_refs = [
-            self.cname.as_ref().map(|c| c.target.as_str()),
+            // The terminal CNAME hop is where the name finally resolves.
+            self.cname
+                .as_ref()
+                .and_then(|c| c.chain.last())
+                .map(String::as_str),
             self.ptr.as_ref().map(|p| p.record.as_str()),
         ];
         if dns_refs.iter().flatten().any(|r| in_zone(r, &zone)) {
@@ -341,6 +394,14 @@ impl Evidence {
             .rdap
             .as_ref()
             .is_some_and(|r| names_operator(&r.netname, &zone))
+        {
+            return InfraOwnership::Own;
+        }
+        // Fallback when RDAP says nothing: the origin AS name.
+        if self
+            .asn
+            .as_ref()
+            .is_some_and(|a| names_operator(&a.asn, &zone))
         {
             return InfraOwnership::Own;
         }
@@ -505,12 +566,19 @@ pub fn determine_vendor(signals: &[Signal]) -> Option<Vendor> {
     }
 }
 
-/// For cloud providers, only CNAME and CERT signals qualify as edge signals.
-/// PTR and RDAP prove infrastructure ownership, not TLS termination.
+/// For cloud providers, only CNAME, CERT and HTTP signals qualify as edge
+/// signals. PTR, RDAP and ASN prove infrastructure ownership, not TLS
+/// termination; HTTP proves the request was actually handled by the edge.
 pub fn filter_edge_signals(signals: &[Signal]) -> Vec<Signal> {
     signals
         .iter()
-        .filter(|s| !s.vendor.is_cloud() || matches!(s.kind, SignalType::Cname | SignalType::Cert))
+        .filter(|s| {
+            !s.vendor.is_cloud()
+                || matches!(
+                    s.kind,
+                    SignalType::Cname | SignalType::Cert | SignalType::Http
+                )
+        })
         .copied()
         .collect()
 }
@@ -553,12 +621,20 @@ pub fn fixture() -> DomainReport {
             vendor: None,
             name: "www.citi.com".to_string(),
         }),
+        http: Some(HttpEvidence {
+            header: "X-Akamai-Request-ID".to_string(),
+            vendor: Vendor::Akamai,
+        }),
         ptr: Some(PtrEvidence {
             record: "a104-96-178-165.deploy.static.akamaitechnologies.com".to_string(),
             vendor: Some(Vendor::Akamai),
         }),
         rdap: Some(RdapEvidence {
             netname: "AKAMAI".to_string(),
+            vendor: Some(Vendor::Akamai),
+        }),
+        asn: Some(AsnEvidence {
+            asn: "AS20940 AKAMAI-ASN1".to_string(),
             vendor: Some(Vendor::Akamai),
         }),
     };
@@ -582,7 +658,7 @@ mod tests {
     fn evidence_slots_become_signals_only_when_vendor_matches() {
         let evidence = Evidence {
             cname: Some(CnameEvidence {
-                target: "cdn.example.net".to_string(),
+                chain: vec!["cdn.example.net".to_string()],
                 vendor: None,
             }),
             range: Some(RangeEvidence {
@@ -593,8 +669,13 @@ mod tests {
                 name: "www.example.com".to_string(),
                 vendor: None,
             }),
+            http: None,
             ptr: None,
             rdap: None,
+            asn: Some(AsnEvidence {
+                asn: "AS64512 EXAMPLE-CORP-AS".to_string(),
+                vendor: None,
+            }),
         };
         let signals = evidence.signals();
         assert_eq!(signals.len(), 1);
@@ -668,6 +749,126 @@ mod tests {
         let edge = filter_edge_signals(&signals);
         assert_eq!(edge.len(), 1);
         assert_eq!(edge[0].kind, SignalType::Cname);
+    }
+
+    #[test]
+    fn asn_corroborates_rdap_without_a_new_evidence_class() {
+        let ptr_rdap = vec![
+            Signal {
+                kind: SignalType::Ptr,
+                vendor: Vendor::Akamai,
+            },
+            Signal {
+                kind: SignalType::Rdap,
+                vendor: Vendor::Akamai,
+            },
+        ];
+        let with_asn = ptr_rdap
+            .iter()
+            .copied()
+            .chain([Signal {
+                kind: SignalType::Asn,
+                vendor: Vendor::Akamai,
+            }])
+            .collect::<Vec<_>>();
+
+        assert_eq!(SignalType::Asn.class(), SignalType::Ptr.class());
+        let without = Signals::aggregate(&ptr_rdap);
+        let with = Signals::aggregate(&with_asn);
+        assert_eq!(without.class_count, 1);
+        assert_eq!(with.class_count, 1, "ASN must not add a third-party class");
+        assert_eq!(with.signal_count, 3);
+        assert_eq!(with.vendor, Some(Vendor::Akamai));
+        assert_eq!(with.confidence, Confidence::Probable);
+    }
+
+    #[test]
+    fn http_edge_processing_is_its_own_evidence_class() {
+        assert_eq!(SignalType::Http.class(), EvidenceClass::EdgeProcessing);
+        let signals = vec![
+            Signal {
+                kind: SignalType::Ptr,
+                vendor: Vendor::Akamai,
+            },
+            Signal {
+                kind: SignalType::Rdap,
+                vendor: Vendor::Akamai,
+            },
+            Signal {
+                kind: SignalType::Asn,
+                vendor: Vendor::Akamai,
+            },
+            Signal {
+                kind: SignalType::Http,
+                vendor: Vendor::Akamai,
+            },
+        ];
+        let aggregate = Signals::aggregate(&signals);
+        assert_eq!(aggregate.class_count, 2);
+        assert_eq!(aggregate.confidence, Confidence::Confirmed);
+    }
+
+    #[test]
+    fn unmatched_http_and_asn_do_not_attribute_a_vendor() {
+        let evidence = Evidence {
+            cname: Some(CnameEvidence {
+                chain: vec!["origin.example.com".to_string()],
+                vendor: None,
+            }),
+            range: None,
+            cert: Some(CertEvidence {
+                name: "www.example.com".to_string(),
+                vendor: None,
+            }),
+            http: None,
+            ptr: Some(PtrEvidence {
+                record: "static.example.com".to_string(),
+                vendor: None,
+            }),
+            rdap: Some(RdapEvidence {
+                netname: "EXAMPLE-CORP".to_string(),
+                vendor: None,
+            }),
+            asn: Some(AsnEvidence {
+                asn: "AS64512 EXAMPLE-CORP-AS".to_string(),
+                vendor: None,
+            }),
+        };
+        assert!(evidence.signals().is_empty());
+
+        let report = DomainReport::build(
+            "www.example.com".to_string(),
+            Some("192.0.2.10".parse().unwrap()),
+            TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: SymmetricAlg::Aes256,
+            },
+            evidence,
+            Local::now(),
+        );
+        assert_eq!(report.infra.vendor, None);
+        assert_eq!(report.infra.confidence, Confidence::None);
+        assert_eq!(report.edge.vendor, None);
+        assert_eq!(report.verdict, Verdict::NoPqOwnInfra);
+    }
+
+    #[test]
+    fn cname_evidence_matches_vendor_anywhere_in_the_chain() {
+        let evidence = Evidence {
+            cname: Some(CnameEvidence {
+                chain: vec![
+                    "www.example.com.glb.example.org".to_string(),
+                    "www.example.com.edgekey.net".to_string(),
+                    "e970.dspg.akamaiedge.net".to_string(),
+                ],
+                vendor: Some(Vendor::Akamai),
+            }),
+            ..Default::default()
+        };
+        let signals = evidence.signals();
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].kind, SignalType::Cname);
+        assert_eq!(signals[0].vendor, Vendor::Akamai);
     }
 
     #[test]
@@ -768,9 +969,9 @@ mod tests {
 
     #[test]
     fn infra_ownership_tracks_zones_and_netnames() {
-        let evidence = |cname: Option<&str>, ptr: Option<&str>, rdap: Option<&str>| Evidence {
-            cname: cname.map(|t| CnameEvidence {
-                target: t.to_string(),
+        let evidence = |cname: Option<&[&str]>, ptr: Option<&str>, rdap: Option<&str>| Evidence {
+            cname: cname.map(|chain| CnameEvidence {
+                chain: chain.iter().map(|t| t.to_string()).collect(),
                 vendor: None,
             }),
             ptr: ptr.map(|r| PtrEvidence {
@@ -796,7 +997,7 @@ mod tests {
         );
         // CNAME delegation to another zone of the same operator.
         assert_eq!(
-            evidence(Some("online.global.mbank.pl"), None, Some("PL-MBANKPL"))
+            evidence(Some(&["online.global.mbank.pl"]), None, Some("PL-MBANKPL"))
                 .infra_ownership("online.mbank.pl"),
             InfraOwnership::Own
         );
@@ -808,7 +1009,7 @@ mod tests {
         );
         // CNAME into a foreign zone.
         assert_eq!(
-            evidence(Some("fe.edelivery.sni.certum.pl"), None, None)
+            evidence(Some(&["fe.edelivery.sni.certum.pl"]), None, None)
                 .infra_ownership("erds.envelo.pl"),
             InfraOwnership::ThirdParty
         );
@@ -851,8 +1052,11 @@ mod tests {
     fn fixture_attributes_akamai_at_edge() {
         let report = fixture();
         assert_eq!(report.infra.vendor, Some(Vendor::Akamai));
+        assert_eq!(report.infra.confidence, Confidence::Confirmed);
         assert_eq!(report.edge.vendor, Some(Vendor::Akamai));
-        assert_eq!(report.edge.confidence, Confidence::Probable);
+        assert_eq!(report.edge.confidence, Confidence::Confirmed);
+        assert_eq!(report.edge.signal_count, 4);
+        assert_eq!(report.edge.class_count, 2);
         assert_eq!(report.verdict, Verdict::NoPqEdge);
         assert!(!report.tls.is_pq());
     }
