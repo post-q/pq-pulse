@@ -71,6 +71,17 @@ signals:
 verdict:       no_pq_edge (The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed.)
 ```
 
+## Installation
+
+From crates.io (requires Rust):
+
+```console
+$ cargo install pq-pulse
+```
+
+Or grab a prebuilt binary from [GitHub Releases](https://github.com/post-q/pq-pulse/releases)
+(`pq-pulse-v<version>-<target>.tar.gz` for Linux x86_64/aarch64 and macOS aarch64).
+
 ## Requirements
 
 - `dig` on PATH (CNAME/PTR/TXT lookups are shell-outs; origin ASN via
@@ -84,4 +95,17 @@ Requires Rust (stable, >= 1.85). If needed, install via [rustup](https://rustup.
 
 ```console
 $ cargo build --release
+```
+
+## Development
+
+Commits follow the [Conventional Commits](https://www.conventionalcommits.org)
+specification; CI rejects non-conforming messages, and the changelog is
+generated from them with [git-cliff](https://git-cliff.org). Install
+[cocogitto](https://docs.cocogitto.io) to validate locally:
+
+```console
+$ cargo install --locked cocogitto
+$ cog install-hooks                  # commit-msg hook: cog verify
+$ cog commit feat "add awesome thing" # instead of git commit -m "feat: ..."
 ```
