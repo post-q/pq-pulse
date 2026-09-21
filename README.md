@@ -1,8 +1,8 @@
 # pq-pulse
 
 Checks whether a domain's TLS key exchange is post-quantum, and attributes the
-TLS endpoint (CDN/WAF edge, cloud, or own infrastructure) from five independent
-evidence sources.
+TLS endpoint (CDN/WAF edge, cloud, or own infrastructure) from 7 evidence
+slots across 5 evidence classes.
 
 ## Usage
 
@@ -23,14 +23,17 @@ tolerated.
 
 - `kx_group` — `X25519MLKEM768` means the key exchange is post-quantum
 - `symmetric_alg` — AES128 / AES256 / CHACHA20-POLY1305
-- five evidence slots — CNAME delegation, published IP ranges, certificate
-  names, PTR, RDAP network registration. `value` is the raw observation;
-  a slot becomes a **signal** when it matches a known vendor
+- 7 evidence slots — CNAME delegation, published IP ranges, certificate
+  names, PTR, RDAP network registration, ASN and HTTP. `value` is the raw observation;
+  an evidence becomes a signal when it matches a known vendor
   (Cloudflare, Akamai, Imperva, Fastly, CloudFront, Myra, Link11,
   Google Cloud, Azure)
 - `signals` — per-scope aggregation: `infra` (who owns the network) and `edge`
-  (who terminates TLS). Cloud PTR/RDAP proves hosting, not edge termination.
-  Two agreeing evidence classes = `confirmed`, one = `probable`
+  (who terminates TLS). Evidence classes: CNAME (DNS delegation), HTTP
+  (actual edge processing), CERT, RANGE, and PTR+RDAP+ASN as one
+  network-ownership class, so agreeing network evidence corroborates without
+  inflating confidence. Cloud PTR/RDAP/ASN proves hosting, not edge
+  termination. Two agreeing evidence classes = `confirmed`, one = `probable`
 
 | verdict | description |
 | --- | --- |
@@ -70,9 +73,10 @@ verdict:       no_pq_edge (The public connection terminates at an identified edg
 
 ## Requirements
 
-- `dig` on PATH (CNAME/PTR lookups are shell-outs)
-- network access; vendor IP ranges are fetched once and cached 24 h in
-  `$TMPDIR/pq-edge-ranges.json`
+- `dig` on PATH (CNAME/PTR/TXT lookups are shell-outs; origin ASN via
+  Team Cymru DNS)
+- network access; one HTTPS request per domain for HTTP evidence; vendor IP
+  ranges are fetched once and cached 24 h in `$TMPDIR/pq-edge-ranges.json`
 
 ## Build
 
