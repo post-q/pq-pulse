@@ -5,7 +5,7 @@
 header = "# Changelog"
 body = """
 {%- if version %}\
-## {{ version | trim_start_matches(pat="v") }} - {{ timestamp }}
+## {{ version | trim_start_matches(pat="v") }} - {{ timestamp | date(format="%Y-%m-%d") }}
 {%- else %}\
 ## Unreleased
 {%- endif %}
