@@ -1,9 +1,8 @@
-use super::Renderer;
-use crate::model::{DomainReport, SignalType, Signals, Vendor};
+use std::collections::HashMap;
 
-/// Human-readable presentation. Mirrors the JSON semantics:
-/// the value is the raw observation, `-> Vendor` marks a signal,
-/// `(none)` means nothing was observed for the slot.
+use super::Renderer;
+use crate::model::{DomainReport, Operator, SignalType, Signals, registrable_zone};
+
 pub struct TextRenderer;
 
 impl Renderer for TextRenderer {
@@ -14,6 +13,14 @@ impl Renderer for TextRenderer {
 
     fn document(&self, report: &DomainReport) -> String {
         let e = &report.evidence;
+        let zone = registrable_zone(&report.domain).unwrap_or_default();
+        let attributed: HashMap<SignalType, Operator> = report
+            .evidence
+            .signals(&report.domain)
+            .into_iter()
+            .map(|s| (s.kind, s.operator))
+            .collect();
+        let slot = |kind: SignalType| attributed.get(&kind).copied();
         let cname_value = e.cname.as_ref().map(|c| c.chain_text());
         let lines = vec![
             field("domain:", &report.domain),
@@ -42,42 +49,41 @@ impl Renderer for TextRenderer {
             evidence_line(
                 SignalType::Cname.as_str(),
                 cname_value.as_deref(),
-                e.cname.as_ref().and_then(|c| c.vendor),
+                slot(SignalType::Cname),
             ),
             evidence_line(
                 SignalType::Range.as_str(),
                 e.range.as_ref().map(|r| r.cidr.as_str()),
-                e.range.as_ref().map(|r| r.vendor),
+                slot(SignalType::Range),
             ),
             evidence_line(
                 SignalType::Cert.as_str(),
                 e.cert.as_ref().map(|c| c.name.as_str()),
-                e.cert.as_ref().and_then(|c| c.vendor),
+                slot(SignalType::Cert),
             ),
             evidence_line(
                 SignalType::Http.as_str(),
                 e.http.as_ref().map(|h| h.header.as_str()),
-                e.http.as_ref().map(|h| h.vendor),
+                slot(SignalType::Http),
             ),
             evidence_line(
                 SignalType::Ptr.as_str(),
                 e.ptr.as_ref().map(|p| p.record.as_str()),
-                e.ptr.as_ref().and_then(|p| p.vendor),
+                slot(SignalType::Ptr),
             ),
             evidence_line(
                 SignalType::Rdap.as_str(),
                 e.rdap.as_ref().map(|r| r.netname.as_str()),
-                e.rdap.as_ref().and_then(|r| r.vendor),
+                slot(SignalType::Rdap),
             ),
             evidence_line(
                 SignalType::Asn.as_str(),
                 e.asn.as_ref().map(|a| a.asn.as_str()),
-                e.asn.as_ref().and_then(|a| a.vendor),
+                slot(SignalType::Asn),
             ),
             String::new(),
             "signals:".to_string(),
-            signals_line("infra:", &report.infra),
-            signals_line("edge:", &report.edge),
+            signals_line("termination:", &report.termination, &zone),
             String::new(),
             field("verdict:", &report.verdict.to_string()),
         ];
@@ -93,18 +99,30 @@ fn field(label: &str, value: &str) -> String {
     format!("{label:<15}{value}")
 }
 
-fn evidence_line(kind: &str, value: Option<&str>, vendor: Option<Vendor>) -> String {
+fn evidence_line(kind: &str, value: Option<&str>, operator: Option<Operator>) -> String {
     let value = value.unwrap_or("(none)");
-    match vendor {
-        Some(vendor) => format!("  {kind:<6}{value} -> {vendor}"),
+    match operator {
+        Some(operator) => format!("  {kind:<6}{value} -> {}", operator.short()),
         None => format!("  {kind:<6}{value}"),
     }
 }
 
-fn signals_line(label: &str, signals: &Signals) -> String {
-    let vendor = signals.vendor.map(|v| v.as_str()).unwrap_or("(none)");
+fn signals_line(label: &str, signals: &Signals, zone: &str) -> String {
+    let subject = match &signals.operator {
+        Some(operator) => operator.label(zone),
+        None if !signals.candidates.is_empty() => {
+            let names = signals
+                .candidates
+                .iter()
+                .map(|op| op.short())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("candidates: {names}")
+        }
+        None => "unresolved".to_string(),
+    };
     format!(
-        "  {label:<7}{vendor} (signals: {}, classes: {}, confidence: {})",
+        "  {label:<13}{subject} (signals: {}, classes: {}, confidence: {})",
         signals.signal_count, signals.class_count, signals.confidence,
     )
 }
@@ -112,7 +130,10 @@ fn signals_line(label: &str, signals: &Signals) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CnameEvidence, Evidence, SymmetricAlg, TlsFacts, Vendor, fixture};
+    use crate::model::{
+        AsnEvidence, CertEvidence, CnameEvidence, Evidence, PtrEvidence, RdapEvidence,
+        SymmetricAlg, TlsFacts, Vendor, fixture,
+    };
 
     #[test]
     fn document_renders_all_slots_with_values_and_signals() {
@@ -132,8 +153,7 @@ mod tests {
             "  RDAP  AKAMAI -> Akamai",
             "  ASN   AS20940 AKAMAI-ASN1 -> Akamai",
             "signals:",
-            "  infra: Akamai (signals: 4, classes: 2, confidence: confirmed)",
-            "  edge:  Akamai (signals: 4, classes: 2, confidence: confirmed)",
+            "  termination: Akamai (signals: 4, classes: 2, confidence: confirmed)",
             "verdict:       no_pq_edge (The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed.)",
         ];
         for line in expected {
@@ -168,6 +188,82 @@ mod tests {
         );
         let text = TextRenderer.document(&report);
         assert!(text.contains("  CNAME www.example.com.glb.example.org -> www.example.com.edgekey.net -> e970.dspg.akamaiedge.net -> Akamai"));
+    }
+
+    #[test]
+    fn document_marks_self_attribution_for_own_infrastructure() {
+        let report = DomainReport::build(
+            "upload.allegro.pl".to_string(),
+            None,
+            TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: SymmetricAlg::Aes256,
+            },
+            Evidence {
+                cname: Some(CnameEvidence {
+                    chain: vec!["upload.allegro.pl".to_string()],
+                    vendor: None,
+                }),
+                cert: Some(CertEvidence {
+                    name: "edge.business.allegro.pl".to_string(),
+                    vendor: None,
+                }),
+                ptr: Some(PtrEvidence {
+                    record: "upload.allegro.com.cz".to_string(),
+                    vendor: None,
+                }),
+                rdap: Some(RdapEvidence {
+                    netname: "ALLEGRO-NET".to_string(),
+                    vendor: None,
+                }),
+                asn: Some(AsnEvidence {
+                    asn: "AS42656 QXL-POLAND".to_string(),
+                    vendor: None,
+                }),
+                ..Default::default()
+            },
+            chrono::Local::now(),
+        );
+        let text = TextRenderer.document(&report);
+        assert!(text.contains("  CNAME upload.allegro.pl -> self"));
+        assert!(text.contains("  CERT  edge.business.allegro.pl\n"));
+        assert!(text.contains("  PTR   upload.allegro.com.cz\n"));
+        assert!(text.contains("  RDAP  ALLEGRO-NET -> self"));
+        assert!(text.contains("  ASN   AS42656 QXL-POLAND\n"));
+        assert!(text.contains(
+            "  termination: self (allegro.pl) (signals: 2, classes: 2, confidence: confirmed)"
+        ));
+        assert!(text.contains("verdict:       no_pq_own_infra"));
+    }
+
+    #[test]
+    fn document_reports_candidates_when_attribution_is_contested() {
+        let report = DomainReport::build(
+            "www.allegro.pl".to_string(),
+            None,
+            TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: SymmetricAlg::Aes256,
+            },
+            Evidence {
+                rdap: Some(RdapEvidence {
+                    netname: "ALLEGRO-HOSTING".to_string(),
+                    vendor: None,
+                }),
+                asn: Some(AsnEvidence {
+                    asn: "AS396982 GOOGLE-CLOUD-PLATFORM".to_string(),
+                    vendor: Some(Vendor::GoogleCloud),
+                }),
+                ..Default::default()
+            },
+            chrono::Local::now(),
+        );
+        let text = TextRenderer.document(&report);
+        assert!(text.contains("  RDAP  ALLEGRO-HOSTING -> self"));
+        assert!(text.contains("  ASN   AS396982 GOOGLE-CLOUD-PLATFORM -> Google Cloud"));
+        assert!(text.contains(
+            "  termination: candidates: self, Google Cloud (signals: 2, classes: 1, confidence: undecided)"
+        ));
     }
 
     #[test]

@@ -1,13 +1,11 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use serde::Serialize;
 
 use super::Renderer;
-use crate::model::{DomainReport, SignalType, Signals};
+use crate::model::{DomainReport, Operator, SignalType, Signals};
 
-/// JSON presentation. `value` is the raw observation for each of the
-/// seven evidence slots, `vendor` the interpretation — a slot is a
-/// signal exactly when `vendor` is non-null.
 pub struct JsonRenderer;
 
 #[derive(Serialize)]
@@ -16,7 +14,7 @@ struct SignalDto<'a> {
     kind: &'a str,
     class: &'a str,
     value: Option<Cow<'a, str>>,
-    vendor: Option<&'a str>,
+    operator: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -28,7 +26,8 @@ struct TlsDto<'a> {
 
 #[derive(Serialize)]
 struct AggregateDto<'a> {
-    vendor: Option<&'a str>,
+    operator: Option<&'a str>,
+    candidates: Vec<&'a str>,
     confidence: &'a str,
     signal_count: usize,
     class_count: usize,
@@ -36,8 +35,7 @@ struct AggregateDto<'a> {
 
 #[derive(Serialize)]
 struct SignalsDto<'a> {
-    infra: AggregateDto<'a>,
-    edge: AggregateDto<'a>,
+    termination: AggregateDto<'a>,
 }
 
 #[derive(Serialize)]
@@ -74,8 +72,7 @@ impl JsonRenderer {
             },
             evidence: Self::signal_dtos(report),
             signals: SignalsDto {
-                infra: Self::aggregate_dto(&report.infra),
-                edge: Self::aggregate_dto(&report.edge),
+                termination: Self::aggregate_dto(&report.termination),
             },
             verdict: report.verdict.as_str(),
         }
@@ -83,7 +80,8 @@ impl JsonRenderer {
 
     fn aggregate_dto(signals: &Signals) -> AggregateDto<'_> {
         AggregateDto {
-            vendor: signals.vendor.map(|v| v.as_str()),
+            operator: signals.operator.map(|op| op.short()),
+            candidates: signals.candidates.iter().map(|op| op.short()).collect(),
             confidence: signals.confidence.as_str(),
             signal_count: signals.signal_count,
             class_count: signals.class_count,
@@ -91,8 +89,15 @@ impl JsonRenderer {
     }
 
     /// The seven evidence slots in a fixed order, present even when empty
-    /// (value and vendor null) so consumers can index positionally.
+    /// (value and operator null) so consumers can index positionally.
     fn signal_dtos(report: &DomainReport) -> Vec<SignalDto<'_>> {
+        let attributed: HashMap<SignalType, Operator> = report
+            .evidence
+            .signals(&report.domain)
+            .into_iter()
+            .map(|s| (s.kind, s.operator))
+            .collect();
+        let operator_of = |kind: SignalType| attributed.get(&kind).copied().map(|op| op.short());
         let e = &report.evidence;
         let cname_value = e.cname.as_ref().map(|c| c.chain_text());
         vec![
@@ -100,43 +105,43 @@ impl JsonRenderer {
                 kind: SignalType::Cname.as_str(),
                 class: SignalType::Cname.class().as_str(),
                 value: cname_value.map(Cow::Owned),
-                vendor: e.cname.as_ref().and_then(|c| c.vendor).map(|v| v.as_str()),
+                operator: operator_of(SignalType::Cname),
             },
             SignalDto {
                 kind: SignalType::Range.as_str(),
                 class: SignalType::Range.class().as_str(),
                 value: e.range.as_ref().map(|r| Cow::Borrowed(r.cidr.as_str())),
-                vendor: e.range.as_ref().map(|r| r.vendor.as_str()),
+                operator: operator_of(SignalType::Range),
             },
             SignalDto {
                 kind: SignalType::Cert.as_str(),
                 class: SignalType::Cert.class().as_str(),
                 value: e.cert.as_ref().map(|c| Cow::Borrowed(c.name.as_str())),
-                vendor: e.cert.as_ref().and_then(|c| c.vendor).map(|v| v.as_str()),
+                operator: operator_of(SignalType::Cert),
             },
             SignalDto {
                 kind: SignalType::Http.as_str(),
                 class: SignalType::Http.class().as_str(),
                 value: e.http.as_ref().map(|h| Cow::Borrowed(h.header.as_str())),
-                vendor: e.http.as_ref().map(|h| h.vendor.as_str()),
+                operator: operator_of(SignalType::Http),
             },
             SignalDto {
                 kind: SignalType::Ptr.as_str(),
                 class: SignalType::Ptr.class().as_str(),
                 value: e.ptr.as_ref().map(|p| Cow::Borrowed(p.record.as_str())),
-                vendor: e.ptr.as_ref().and_then(|p| p.vendor).map(|v| v.as_str()),
+                operator: operator_of(SignalType::Ptr),
             },
             SignalDto {
                 kind: SignalType::Rdap.as_str(),
                 class: SignalType::Rdap.class().as_str(),
                 value: e.rdap.as_ref().map(|r| Cow::Borrowed(r.netname.as_str())),
-                vendor: e.rdap.as_ref().and_then(|r| r.vendor).map(|v| v.as_str()),
+                operator: operator_of(SignalType::Rdap),
             },
             SignalDto {
                 kind: SignalType::Asn.as_str(),
                 class: SignalType::Asn.class().as_str(),
                 value: e.asn.as_ref().map(|a| Cow::Borrowed(a.asn.as_str())),
-                vendor: e.asn.as_ref().and_then(|a| a.vendor).map(|v| v.as_str()),
+                operator: operator_of(SignalType::Asn),
             },
         ]
     }
@@ -198,29 +203,111 @@ mod tests {
         assert_eq!(signals[1]["type"], "RANGE");
         assert_eq!(signals[2]["type"], "CERT");
         assert_eq!(signals[2]["value"], "www.citi.com");
-        assert!(signals[2]["vendor"].is_null());
+        assert!(signals[2]["operator"].is_null());
         assert_eq!(signals[3]["type"], "HTTP");
         assert_eq!(signals[3]["class"], "edge_processing");
         assert_eq!(signals[3]["value"], "X-Akamai-Request-ID");
-        assert_eq!(signals[3]["vendor"], "Akamai");
+        assert_eq!(signals[3]["operator"], "Akamai");
         assert_eq!(signals[4]["type"], "PTR");
         assert_eq!(
             signals[4]["value"],
             "a104-96-178-165.deploy.static.akamaitechnologies.com"
         );
-        assert_eq!(signals[4]["vendor"], "Akamai");
+        assert_eq!(signals[4]["operator"], "Akamai");
         assert_eq!(signals[5]["type"], "RDAP");
         assert_eq!(signals[5]["value"], "AKAMAI");
-        assert_eq!(signals[5]["vendor"], "Akamai");
+        assert_eq!(signals[5]["operator"], "Akamai");
         assert_eq!(signals[6]["type"], "ASN");
         assert_eq!(signals[6]["class"], "ip_infra");
         assert_eq!(signals[6]["value"], "AS20940 AKAMAI-ASN1");
-        assert_eq!(signals[6]["vendor"], "Akamai");
+        assert_eq!(signals[6]["operator"], "Akamai");
 
-        assert_eq!(value["signals"]["infra"]["vendor"], "Akamai");
-        assert_eq!(value["signals"]["infra"]["confidence"], "confirmed");
-        assert_eq!(value["signals"]["edge"]["class_count"], 2);
+        assert_eq!(value["signals"]["termination"]["operator"], "Akamai");
+        assert_eq!(value["signals"]["termination"]["confidence"], "confirmed");
+        assert_eq!(value["signals"]["termination"]["signal_count"], 4);
+        assert_eq!(value["signals"]["termination"]["class_count"], 2);
         assert_eq!(value["verdict"], "no_pq_edge");
+    }
+
+    #[test]
+    fn json_reports_candidates_when_attribution_is_contested() {
+        let report = crate::model::DomainReport::build(
+            "www.allegro.pl".to_string(),
+            None,
+            crate::model::TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: crate::model::SymmetricAlg::Aes256,
+            },
+            crate::model::Evidence {
+                rdap: Some(crate::model::RdapEvidence {
+                    netname: "ALLEGRO-HOSTING".to_string(),
+                    vendor: None,
+                }),
+                asn: Some(crate::model::AsnEvidence {
+                    asn: "AS396982 GOOGLE-CLOUD-PLATFORM".to_string(),
+                    vendor: Some(crate::model::Vendor::GoogleCloud),
+                }),
+                ..Default::default()
+            },
+            chrono::Local::now(),
+        );
+        let value: Value = serde_json::from_str(&JsonRenderer.document(&report)).unwrap();
+        let termination = &value["signals"]["termination"];
+        assert!(termination["operator"].is_null());
+        assert_eq!(termination["candidates"][0], "self");
+        assert_eq!(termination["candidates"][1], "Google Cloud");
+        assert_eq!(termination["confidence"], "undecided");
+        assert_eq!(termination["signal_count"], 2);
+        assert_eq!(termination["class_count"], 1);
+    }
+
+    #[test]
+    fn json_marks_self_operator_for_own_infrastructure() {
+        let report = crate::model::DomainReport::build(
+            "upload.allegro.pl".to_string(),
+            None,
+            crate::model::TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: crate::model::SymmetricAlg::Aes256,
+            },
+            crate::model::Evidence {
+                cname: Some(crate::model::CnameEvidence {
+                    chain: vec!["upload.allegro.pl".to_string()],
+                    vendor: None,
+                }),
+                cert: Some(crate::model::CertEvidence {
+                    name: "edge.business.allegro.pl".to_string(),
+                    vendor: None,
+                }),
+                ptr: Some(crate::model::PtrEvidence {
+                    record: "upload.allegro.com.cz".to_string(),
+                    vendor: None,
+                }),
+                rdap: Some(crate::model::RdapEvidence {
+                    netname: "ALLEGRO-NET".to_string(),
+                    vendor: None,
+                }),
+                asn: Some(crate::model::AsnEvidence {
+                    asn: "AS42656 QXL-POLAND".to_string(),
+                    vendor: None,
+                }),
+                ..Default::default()
+            },
+            chrono::Local::now(),
+        );
+        let value: Value = serde_json::from_str(&JsonRenderer.document(&report)).unwrap();
+        let signals = value["evidence"].as_array().unwrap();
+        assert_eq!(signals[0]["operator"], "self");
+        assert_eq!(signals[5]["operator"], "self");
+        assert!(signals[2]["operator"].is_null());
+        assert!(signals[3]["operator"].is_null());
+        assert!(signals[4]["operator"].is_null());
+        assert!(signals[6]["operator"].is_null());
+        assert_eq!(value["signals"]["termination"]["operator"], "self");
+        assert_eq!(value["signals"]["termination"]["signal_count"], 2);
+        assert_eq!(value["signals"]["termination"]["class_count"], 2);
+        assert_eq!(value["signals"]["termination"]["confidence"], "confirmed");
+        assert_eq!(value["verdict"], "no_pq_own_infra");
     }
 
     #[test]

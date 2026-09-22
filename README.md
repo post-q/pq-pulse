@@ -25,15 +25,17 @@ tolerated.
 - `symmetric_alg` — AES128 / AES256 / CHACHA20-POLY1305
 - 7 evidence slots — CNAME delegation, published IP ranges, certificate
   names, PTR, RDAP network registration, ASN and HTTP. `value` is the raw observation;
-  an evidence becomes a signal when it matches a known vendor
+  evidence becomes a signal when it is deterministically attributed to
+  either the scanned organization itself (own-zone CNAME/PTR, RDAP/ASN
+  echoing the registrable label → `self (zone)`) or a known vendor
   (Cloudflare, Akamai, Imperva, Fastly, CloudFront, Myra, Link11,
-  Google Cloud, Azure)
-- `signals` — per-scope aggregation: `infra` (who owns the network) and `edge`
-  (who terminates TLS). Evidence classes: CNAME (DNS delegation), HTTP
-  (actual edge processing), CERT, RANGE, and PTR+RDAP+ASN as one
-  network-ownership class, so agreeing network evidence corroborates without
-  inflating confidence. Cloud PTR/RDAP/ASN proves hosting, not edge
-  termination. Two agreeing evidence classes = `confirmed`, one = `probable`
+  Google Cloud, Azure). Unresolved evidence is neutral and never counts
+- `signals` — TLS-endpoint attribution: `self`, a known provider, or
+  `unresolved`. Evidence classes: CNAME (DNS delegation), HTTP (actual edge
+  processing), CERT, RANGE, and PTR+RDAP+ASN as one network-ownership class,
+  so agreeing network evidence corroborates without inflating confidence.
+  Contested attribution is reported as `candidates`. Two agreeing evidence
+  classes = `confirmed`, one = `probable`
 
 | verdict | description |
 | --- | --- |
@@ -65,8 +67,7 @@ evidence:
   ASN   AS33905 AKAMAI-AMS -> Akamai
 
 signals:
-  infra: Akamai (signals: 4, classes: 2, confidence: confirmed)
-  edge:  Akamai (signals: 4, classes: 2, confidence: confirmed)
+  termination: Akamai (signals: 4, classes: 2, confidence: confirmed)
 
 verdict:       no_pq_edge (The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed.)
 ```
