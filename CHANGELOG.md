@@ -1,4 +1,12 @@
 # Changelog
+## Unreleased
+
+### Features
+- Add termination signal in favor of infra/edge signals
+
+### Miscellaneous Tasks
+- Release pq-pulse version 0.5.0
+
 ## 0.4.0 - 2026-09-21
 
 ### Bug Fixes
