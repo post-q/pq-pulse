@@ -2,7 +2,7 @@ use crate::model::Vendor;
 
 // Token-exact matching (case-insensitive): "THALES-IMPERVA-NA4-AGG" splits
 // into tokens so "IMPERVA" matches Imperva, but "PALMYRA" does NOT match "MYRA".
-const VENDOR_ALIASES: &[(&[&str], Vendor)] = &[
+pub(crate) const VENDOR_ALIASES: &[(&[&str], Vendor)] = &[
     (&["CLOUDFLARE", "CLOUDFLARENET"], Vendor::Cloudflare),
     (
         &["AKAMAI", "AKAMAITECHNOLOGIES", "AKAMAIEDGE", "AKAMAIHD"],
@@ -21,7 +21,7 @@ const VENDOR_ALIASES: &[(&[&str], Vendor)] = &[
 ];
 
 // Known vendor DNS zones for CNAME delegation
-const VENDOR_ZONES: &[(&str, Vendor)] = &[
+pub(crate) const VENDOR_ZONES: &[(&str, Vendor)] = &[
     ("cloudflare.com", Vendor::Cloudflare),
     ("cloudflare.net", Vendor::Cloudflare),
     ("akamai.net", Vendor::Akamai),
@@ -50,8 +50,12 @@ const VENDOR_ZONES: &[(&str, Vendor)] = &[
 // HTTP response header-name prefixes that are unambiguously vendor-
 // specific. Generic headers (Server, Via, X-Cache) are deliberately
 // absent: a header must carry the vendor's own name to be evidence.
-const VENDOR_HEADER_PREFIXES: &[(&str, Vendor)] =
-    &[("x-akamai-", Vendor::Akamai), ("akamai-", Vendor::Akamai)];
+const VENDOR_HEADER_PREFIXES: &[(&str, Vendor)] = &[
+    ("x-akamai-", Vendor::Akamai),
+    ("akamai-", Vendor::Akamai),
+    ("x-iinfo-", Vendor::Imperva),
+    ("x-iinfo", Vendor::Imperva),
+];
 
 pub(crate) fn match_vendor(text: &str) -> Option<Vendor> {
     let text_upper = text.to_uppercase();

@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use chrono::{DateTime, Local};
@@ -44,88 +43,6 @@ impl std::fmt::Display for Vendor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Operator {
-    Own,
-    Vendor(Vendor),
-}
-
-impl Operator {
-    pub const fn short(&self) -> &'static str {
-        match self {
-            Operator::Own => "self",
-            Operator::Vendor(vendor) => vendor.as_str(),
-        }
-    }
-
-    pub fn label(&self, zone: &str) -> String {
-        match self {
-            Operator::Own => format!("self ({zone})"),
-            Operator::Vendor(vendor) => vendor.as_str().to_string(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SignalType {
-    Cname,
-    Range,
-    Cert,
-    Http,
-    Ptr,
-    Rdap,
-    Asn,
-}
-
-impl SignalType {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            SignalType::Cname => "CNAME",
-            SignalType::Range => "RANGE",
-            SignalType::Cert => "CERT",
-            SignalType::Http => "HTTP",
-            SignalType::Ptr => "PTR",
-            SignalType::Rdap => "RDAP",
-            SignalType::Asn => "ASN",
-        }
-    }
-
-    /// Evidence class of this signal type.
-    /// PTR, RDAP and ASN all derive from IP block ownership — counted
-    /// as one class. HTTP shows the request was actually processed by
-    /// the vendor edge — its own class.
-    pub const fn class(&self) -> EvidenceClass {
-        match self {
-            SignalType::Cname => EvidenceClass::DnsDelegation,
-            SignalType::Range => EvidenceClass::PublishedRange,
-            SignalType::Cert => EvidenceClass::Certificate,
-            SignalType::Http => EvidenceClass::EdgeProcessing,
-            SignalType::Ptr | SignalType::Rdap | SignalType::Asn => EvidenceClass::IpInfra,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum EvidenceClass {
-    DnsDelegation,
-    PublishedRange,
-    Certificate,
-    EdgeProcessing,
-    IpInfra,
-}
-
-impl EvidenceClass {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            EvidenceClass::DnsDelegation => "dns_delegation",
-            EvidenceClass::PublishedRange => "published_range",
-            EvidenceClass::Certificate => "certificate",
-            EvidenceClass::EdgeProcessing => "edge_processing",
-            EvidenceClass::IpInfra => "ip_infra",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymmetricAlg {
     Aes128,
@@ -149,8 +66,8 @@ impl SymmetricAlg {
 
     pub const fn as_str(&self) -> &'static str {
         match self {
-            SymmetricAlg::Aes128 => "AES128",
-            SymmetricAlg::Aes256 => "AES256",
+            SymmetricAlg::Aes128 => "AES-128",
+            SymmetricAlg::Aes256 => "AES-256",
             SymmetricAlg::Chacha20 => "CHACHA20-POLY1305",
             SymmetricAlg::Other => "OTHER",
         }
@@ -167,7 +84,6 @@ impl std::fmt::Display for SymmetricAlg {
 pub enum Confidence {
     Confirmed,
     Probable,
-    Undecided,
     None,
 }
 
@@ -176,7 +92,6 @@ impl Confidence {
         match self {
             Confidence::Confirmed => "confirmed",
             Confidence::Probable => "probable",
-            Confidence::Undecided => "undecided",
             Confidence::None => "none",
         }
     }
@@ -191,54 +106,69 @@ impl std::fmt::Display for Confidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     PqAtEdge,
-    PqCloudHosted,
-    PqVendorHosted,
-    PqOwnInfra,
-    NoPqEdge,
-    NoPqCloudHosted,
-    NoPqVendorHosted,
-    NoPqOwnInfra,
+    PqLikelyAtEdge,
+    PqOnOrgInfra,
+    PqOnThirdPartyInfra,
+    PqUnattributed,
+    NoPqAtEdge,
+    NoPqLikelyAtEdge,
+    NoPqOnOrgInfra,
+    NoPqOnThirdPartyInfra,
+    NoPqUnattributed,
+    TlsUnavailable,
 }
 
 impl Verdict {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Verdict::PqAtEdge => "pq_at_edge",
-            Verdict::PqCloudHosted => "pq_cloud_hosted",
-            Verdict::PqVendorHosted => "pq_vendor_hosted",
-            Verdict::PqOwnInfra => "pq_own_infra",
-            Verdict::NoPqEdge => "no_pq_edge",
-            Verdict::NoPqCloudHosted => "no_pq_cloud_hosted",
-            Verdict::NoPqVendorHosted => "no_pq_vendor_hosted",
-            Verdict::NoPqOwnInfra => "no_pq_own_infra",
+            Verdict::PqLikelyAtEdge => "pq_likely_at_edge",
+            Verdict::PqOnOrgInfra => "pq_on_org_infra",
+            Verdict::PqOnThirdPartyInfra => "pq_on_third_party_infra",
+            Verdict::PqUnattributed => "pq_unattributed",
+            Verdict::NoPqAtEdge => "classical_at_edge",
+            Verdict::NoPqLikelyAtEdge => "classical_likely_at_edge",
+            Verdict::NoPqOnOrgInfra => "classical_on_org_infra",
+            Verdict::NoPqOnThirdPartyInfra => "classical_on_third_party_infra",
+            Verdict::NoPqUnattributed => "classical_unattributed",
+            Verdict::TlsUnavailable => "tls_unavailable",
         }
     }
 
     pub const fn explanation(&self) -> &'static str {
         match self {
             Verdict::PqAtEdge => {
-                "The public connection terminates at an identified edge/CDN/security provider, where post-quantum or hybrid key exchange is enabled."
+                "Post-quantum or hybrid key exchange, with at least two independent pieces of evidence that the connection terminates at a provider edge/CDN/WAF."
             }
-            Verdict::PqCloudHosted => {
-                "The service is hosted on infrastructure attributed to a public cloud provider, with post-quantum or hybrid key exchange enabled."
+            Verdict::PqLikelyAtEdge => {
+                "Post-quantum or hybrid key exchange, with one strong indication of provider-managed edge termination."
             }
-            Verdict::PqVendorHosted => {
-                "The service is hosted on infrastructure attributed to a third-party provider, with post-quantum or hybrid key exchange enabled."
+            Verdict::PqOnOrgInfra => {
+                "Post-quantum or hybrid key exchange on infrastructure attributed to the organization itself."
             }
-            Verdict::PqOwnInfra => {
-                "The service appears to terminate on infrastructure operated by the organization, with post-quantum or hybrid key exchange enabled."
+            Verdict::PqOnThirdPartyInfra => {
+                "Post-quantum or hybrid key exchange on infrastructure attributed to a third party."
             }
-            Verdict::NoPqEdge => {
-                "The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed."
+            Verdict::PqUnattributed => {
+                "Post-quantum or hybrid key exchange; the infrastructure could not be attributed."
             }
-            Verdict::NoPqCloudHosted => {
-                "The service is hosted on infrastructure attributed to a public cloud provider, but no post-quantum key exchange was observed."
+            Verdict::NoPqAtEdge => {
+                "No post-quantum key exchange, with at least two independent pieces of evidence that the connection terminates at a provider edge/CDN/WAF."
             }
-            Verdict::NoPqVendorHosted => {
-                "The service is hosted on infrastructure attributed to a third-party provider, but no post-quantum key exchange was observed."
+            Verdict::NoPqLikelyAtEdge => {
+                "No post-quantum key exchange, with one strong indication of provider-managed edge termination."
             }
-            Verdict::NoPqOwnInfra => {
-                "The service appears to terminate on infrastructure operated by the organization, but no post-quantum key exchange was observed."
+            Verdict::NoPqOnOrgInfra => {
+                "No post-quantum key exchange on infrastructure attributed to the organization itself."
+            }
+            Verdict::NoPqOnThirdPartyInfra => {
+                "No post-quantum key exchange on infrastructure attributed to a third party."
+            }
+            Verdict::NoPqUnattributed => {
+                "No post-quantum key exchange; the infrastructure could not be attributed."
+            }
+            Verdict::TlsUnavailable => {
+                "No HTTPS/TLS endpoint was reachable, so no key exchange could be observed; the post-quantum status is unknown."
             }
         }
     }
@@ -248,12 +178,6 @@ impl std::fmt::Display for Verdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({})", self.as_str(), self.explanation())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Signal {
-    pub kind: SignalType,
-    pub operator: Operator,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +205,8 @@ pub struct RangeEvidence {
 pub struct CertEvidence {
     pub name: String,
     pub vendor: Option<Vendor>,
+    /// Every observed name: subject CN, issuer CN and SANs.
+    pub names: Vec<String>,
 }
 
 /// A vendor-specific HTTP response header observed on a live request.
@@ -312,15 +238,85 @@ pub struct AsnEvidence {
     pub vendor: Option<Vendor>,
 }
 
-/// Who operates the resolved infrastructure, as far as the raw evidence
-/// says: `Own` when the CNAME/PTR stay inside the domain's registrable
-/// zone or the RDAP netname names the same operator, `ThirdParty` when
-/// they point into someone else's zone, `Unknown` when it cannot tell.
+/// Who owns the infrastructure the endpoint runs on, per the scoring
+/// rules: the organization itself, an identifiable third party, or
+/// unknown when the evidence is absent, weak or contested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InfraOwnership {
-    Own,
+pub enum InfraOwner {
+    Organization,
     ThirdParty,
     Unknown,
+}
+
+impl InfraOwner {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            InfraOwner::Organization => "organization",
+            InfraOwner::ThirdParty => "third-party",
+            InfraOwner::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Infrastructure {
+    pub owner: InfraOwner,
+    pub provider: Option<String>,
+    pub org_score: u32,
+    pub third_party_score: u32,
+    pub confidence: Confidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeSignal {
+    Cname,
+    Range,
+    Http,
+    Cert,
+    Other,
+}
+
+impl EdgeSignal {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            EdgeSignal::Cname => "CNAME",
+            EdgeSignal::Range => "RANGE",
+            EdgeSignal::Http => "HTTP",
+            EdgeSignal::Cert => "CERT",
+            EdgeSignal::Other => "OTHER",
+        }
+    }
+
+    pub const fn is_strong(&self) -> bool {
+        matches!(
+            self,
+            EdgeSignal::Cname | EdgeSignal::Range | EdgeSignal::Http
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminationRole {
+    Edge,
+    LikelyEdge,
+    Unproven,
+}
+
+impl TerminationRole {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            TerminationRole::Edge => "edge",
+            TerminationRole::LikelyEdge => "likely_edge",
+            TerminationRole::Unproven => "unproven",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Termination {
+    pub role: TerminationRole,
+    pub confidence: Confidence,
+    pub edge_classes: Vec<EdgeSignal>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -334,126 +330,200 @@ pub struct Evidence {
     pub asn: Option<AsnEvidence>,
 }
 
-impl Evidence {
-    pub fn signals(&self, domain: &str) -> Vec<Signal> {
-        let zone = registrable_zone(domain);
-        let in_own_zone = |name: &str| zone.as_deref().is_some_and(|z| in_zone(name, z));
-        let names_org = |text: &str| zone.as_deref().is_some_and(|z| names_operator(text, z));
-        let mut signals = Vec::new();
-        if let Some(cname) = &self.cname {
-            let operator = match cname.vendor {
-                Some(vendor) => Some(Operator::Vendor(vendor)),
-                None if cname.chain.last().is_some_and(|hop| in_own_zone(hop)) => {
-                    Some(Operator::Own)
-                }
-                None => None,
-            };
-            if let Some(operator) = operator {
-                signals.push(Signal {
-                    kind: SignalType::Cname,
-                    operator,
-                });
-            }
+/// Infrastructure ownership per the scoring rules. Provider identity
+/// never implies provider role: this answers only "whose infrastructure
+/// is this?".
+///
+/// Weights (organization | third party):
+///   final CNAME in org zone +1 | in a third-party zone +2
+///   PTR in org zone +1         | in a third-party zone +1
+///   RDAP netname names the org +3 | identified third party +3
+///   AS name names the org +4   | identified third party +4
+///   resolved IP in org ranges +4  | in provider ranges +4
+///
+/// A side scores only from 4 upward and must strictly beat the other;
+/// anything weaker or tied stays unknown.
+pub fn attribute_infrastructure(evidence: &Evidence, domain: &str) -> Infrastructure {
+    let zone = registrable_zone(domain);
+    let in_own_zone = |name: &str| zone.as_deref().is_some_and(|z| in_zone(name, z));
+    let names_org = |text: &str| zone.as_deref().is_some_and(|z| names_operator(text, z));
+
+    let mut org_score: u32 = 0;
+    let mut third_party_score: u32 = 0;
+    let mut provider: Option<String> = None;
+
+    if let Some(cname) = &evidence.cname
+        && let Some(hop) = cname.chain.last()
+    {
+        if in_own_zone(hop) {
+            org_score += 1;
+        } else {
+            third_party_score += 2;
         }
-        if let Some(range) = &self.range {
-            signals.push(Signal {
-                kind: SignalType::Range,
-                operator: Operator::Vendor(range.vendor),
-            });
-        }
-        if let Some(cert) = &self.cert {
-            if let Some(vendor) = cert.vendor {
-                signals.push(Signal {
-                    kind: SignalType::Cert,
-                    operator: Operator::Vendor(vendor),
-                });
-            }
-        }
-        if let Some(http) = &self.http {
-            signals.push(Signal {
-                kind: SignalType::Http,
-                operator: Operator::Vendor(http.vendor),
-            });
-        }
-        if let Some(ptr) = &self.ptr {
-            let operator = match ptr.vendor {
-                Some(vendor) => Some(Operator::Vendor(vendor)),
-                None if in_own_zone(&ptr.record) => Some(Operator::Own),
-                None => None,
-            };
-            if let Some(operator) = operator {
-                signals.push(Signal {
-                    kind: SignalType::Ptr,
-                    operator,
-                });
-            }
-        }
-        if let Some(rdap) = &self.rdap {
-            let operator = match rdap.vendor {
-                Some(vendor) => Some(Operator::Vendor(vendor)),
-                None if names_org(&rdap.netname) => Some(Operator::Own),
-                None => None,
-            };
-            if let Some(operator) = operator {
-                signals.push(Signal {
-                    kind: SignalType::Rdap,
-                    operator,
-                });
-            }
-        }
-        if let Some(asn) = &self.asn {
-            let operator = match asn.vendor {
-                Some(vendor) => Some(Operator::Vendor(vendor)),
-                None if names_org(&asn.asn) => Some(Operator::Own),
-                None => None,
-            };
-            if let Some(operator) = operator {
-                signals.push(Signal {
-                    kind: SignalType::Asn,
-                    operator,
-                });
-            }
-        }
-        signals
     }
 
-    pub fn infra_ownership(&self, domain: &str) -> InfraOwnership {
-        let Some(zone) = registrable_zone(domain) else {
-            return InfraOwnership::Unknown;
-        };
-        let dns_refs = [
-            // The terminal CNAME hop is where the name finally resolves.
-            self.cname
-                .as_ref()
-                .and_then(|c| c.chain.last())
-                .map(String::as_str),
-            self.ptr.as_ref().map(|p| p.record.as_str()),
-        ];
-        if dns_refs.iter().flatten().any(|r| in_zone(r, &zone)) {
-            return InfraOwnership::Own;
+    if let Some(ptr) = &evidence.ptr {
+        if in_own_zone(&ptr.record) {
+            org_score += 1;
+        } else {
+            third_party_score += 1;
         }
-        if self
-            .rdap
-            .as_ref()
-            .is_some_and(|r| names_operator(&r.netname, &zone))
-        {
-            return InfraOwnership::Own;
+    }
+
+    let identity = named_third_party(evidence, &names_org);
+
+    if let Some(range) = &evidence.range {
+        third_party_score += 4;
+        provider = Some(range.vendor.as_str().to_string());
+    }
+
+    if let Some(asn) = &evidence.asn {
+        if names_org(&asn.asn) {
+            org_score += 4;
+        } else if let Some(vendor) = asn.vendor {
+            third_party_score += 4;
+            provider = Some(vendor.as_str().to_string());
+        } else if identity.is_some() {
+            third_party_score += 4;
+            provider = identity.clone();
         }
-        if self
+    }
+
+    if let Some(rdap) = &evidence.rdap {
+        if names_org(&rdap.netname) {
+            org_score += 3;
+        } else if let Some(vendor) = rdap.vendor {
+            third_party_score += 3;
+            provider = Some(vendor.as_str().to_string());
+        } else if identity.is_some() {
+            third_party_score += 3;
+            provider = identity;
+        }
+    }
+
+    let owner = if org_score >= 4 && org_score > third_party_score {
+        InfraOwner::Organization
+    } else if third_party_score >= 4 && third_party_score > org_score {
+        InfraOwner::ThirdParty
+    } else {
+        InfraOwner::Unknown
+    };
+    let confidence = match owner {
+        InfraOwner::Unknown => Confidence::None,
+        _ if org_score.abs_diff(third_party_score) >= 4 => Confidence::Confirmed,
+        _ => Confidence::Probable,
+    };
+
+    Infrastructure {
+        owner,
+        provider,
+        org_score,
+        third_party_score,
+        confidence,
+    }
+}
+
+/// An AS name and an RDAP organization that agree on a shared
+/// alphabetic token identify the network operator — without any
+/// provider list. The identity must not be the scanned organization
+/// itself, and both names must exist.
+fn named_third_party(evidence: &Evidence, names_org: &impl Fn(&str) -> bool) -> Option<String> {
+    let asn = evidence.asn.as_ref()?;
+    let rdap = evidence.rdap.as_ref()?;
+    if names_org(&asn.asn) || names_org(&rdap.netname) {
+        return None;
+    }
+    if asn.vendor.is_some() || rdap.vendor.is_some() {
+        return None;
+    }
+    let asn_tokens = identity_tokens(&asn.asn);
+    identity_tokens(&rdap.netname)
+        .into_iter()
+        .find(|token| asn_tokens.contains(token))
+        .map(|token| display_provider(&token))
+}
+
+fn identity_tokens(text: &str) -> Vec<String> {
+    text.to_uppercase()
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|token| token.len() >= 3)
+        .map(String::from)
+        .collect()
+}
+
+fn display_provider(token: &str) -> String {
+    if token.len() <= 3 {
+        token.to_uppercase()
+    } else {
+        let mut chars = token.chars();
+        match chars.next() {
+            Some(first) => {
+                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+            }
+            None => token.to_string(),
+        }
+    }
+}
+
+/// Whether the endpoint sits behind a provider-managed edge/CDN/WAF,
+/// and with how much confidence. Role evidence is independent of
+/// ownership: an OVH ASN is hosting, never an edge, and an edge CNAME
+/// alone is not proof either.
+pub fn termination_role(evidence: &Evidence, domain: &str) -> Termination {
+    let _ = domain;
+    let mut edge_classes: Vec<EdgeSignal> = Vec::new();
+
+    if evidence
+        .cname
+        .as_ref()
+        .is_some_and(|cname| cname.vendor.is_some())
+    {
+        edge_classes.push(EdgeSignal::Cname);
+    }
+    if evidence.range.is_some() {
+        edge_classes.push(EdgeSignal::Range);
+    }
+    if evidence.http.is_some() {
+        edge_classes.push(EdgeSignal::Http);
+    }
+    if let Some(cert) = &evidence.cert
+        && cert.names.iter().any(|name| {
+            crate::providers::VENDOR_ZONES.iter().any(|(zone, _)| {
+                let lowered = name.to_lowercase();
+                lowered.ends_with(&format!(".{zone}")) || lowered == *zone
+            })
+        })
+    {
+        edge_classes.push(EdgeSignal::Cert);
+    }
+    if evidence
+        .rdap
+        .as_ref()
+        .is_some_and(|rdap| rdap.vendor.is_some_and(|vendor| !vendor.is_cloud()))
+        || evidence
             .asn
             .as_ref()
-            .is_some_and(|a| names_operator(&a.asn, &zone))
-        {
-            return InfraOwnership::Own;
-        }
-        if dns_refs
-            .iter()
-            .flatten()
-            .any(|r| registrable_zone(r).is_some_and(|foreign| foreign != zone))
-        {
-            return InfraOwnership::ThirdParty;
-        }
-        InfraOwnership::Unknown
+            .is_some_and(|asn| asn.vendor.is_some_and(|vendor| !vendor.is_cloud()))
+    {
+        edge_classes.push(EdgeSignal::Other);
+    }
+
+    let role = if edge_classes.len() >= 2 {
+        TerminationRole::Edge
+    } else if edge_classes.len() == 1 && edge_classes[0].is_strong() {
+        TerminationRole::LikelyEdge
+    } else {
+        TerminationRole::Unproven
+    };
+    let confidence = match role {
+        TerminationRole::Edge => Confidence::Confirmed,
+        TerminationRole::LikelyEdge => Confidence::Probable,
+        TerminationRole::Unproven => Confidence::None,
+    };
+    Termination {
+        role,
+        confidence,
+        edge_classes,
     }
 }
 
@@ -505,7 +575,7 @@ fn names_operator(netname: &str, zone: &str) -> bool {
         .any(|token| token == label)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsFacts {
     pub kx_group: String,
     pub symmetric_alg: SymmetricAlg,
@@ -517,141 +587,171 @@ impl TlsFacts {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Signals {
-    pub operator: Option<Operator>,
-    pub candidates: Vec<Operator>,
-    pub confidence: Confidence,
-    pub signal_count: usize,
-    pub class_count: usize,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MxRecord {
+    pub priority: u16,
+    pub host: String,
 }
 
-impl Signals {
-    pub fn aggregate(signals: &[Signal]) -> Self {
-        let operator = determine_operator(signals);
-        let candidates = if operator.is_none() {
-            let mut seen: Vec<Operator> = Vec::new();
-            for signal in signals {
-                if !seen.contains(&signal.operator) {
-                    seen.push(signal.operator);
-                }
-            }
-            seen
-        } else {
-            Vec::new()
-        };
-        let attributed: Vec<&Signal> = match operator {
-            Some(op) => signals.iter().filter(|s| s.operator == op).collect(),
-            None => signals.iter().collect(),
-        };
-        let class_count = attributed
-            .iter()
-            .map(|s| s.kind.class())
-            .collect::<HashSet<EvidenceClass>>()
-            .len();
-        Self {
-            operator,
-            candidates,
-            confidence: confidence_of(operator, class_count),
-            signal_count: attributed.len(),
-            class_count,
-        }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TlsState {
+    Unavailable,
+    Tls(TlsSession),
+}
+
+/// A completed TLS session: protocol version, key-exchange group and
+/// symmetric suite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsSession {
+    pub version: String,
+    pub facts: TlsFacts,
+}
+
+impl TlsSession {
+    pub fn is_pq(&self) -> bool {
+        self.facts.is_pq()
     }
 }
 
-/// The state produced by checking one domain: raw evidence,
-/// per-scope signal aggregates and verdict. Presentation-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Port {
+    Smtp25,
+    Submission587,
+    Smtps465,
+}
+
+impl Port {
+    pub const ALL: [Port; 3] = [Port::Smtp25, Port::Submission587, Port::Smtps465];
+
+    pub const fn number(&self) -> u16 {
+        match self {
+            Port::Smtp25 => 25,
+            Port::Submission587 => 587,
+            Port::Smtps465 => 465,
+        }
+    }
+
+    pub const fn has_starttls(&self) -> bool {
+        !matches!(self, Port::Smtps465)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmtpState {
+    Unreachable,
+    NoStarttls,
+    TlsFailed,
+    Tls(TlsSession),
+}
+
+#[derive(Debug, Clone)]
+pub struct PortProbe {
+    pub port: Port,
+    pub state: SmtpState,
+}
+
+#[derive(Debug, Clone)]
+pub struct MxProbe {
+    pub priority: u16,
+    pub host: String,
+    pub addresses: Vec<IpAddr>,
+    pub ip: Option<IpAddr>,
+    pub ports: Vec<PortProbe>,
+    pub evidence: Evidence,
+    pub infrastructure: Infrastructure,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmailReport {
+    pub mx: Vec<MxProbe>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DomainReport {
     pub domain: String,
     pub checked_at: DateTime<Local>,
     pub resolved_ip: Option<IpAddr>,
-    pub tls: TlsFacts,
+    pub tls: TlsState,
     pub evidence: Evidence,
-    pub termination: Signals,
+    pub infrastructure: Infrastructure,
+    pub termination: Termination,
     pub verdict: Verdict,
+    pub email: Option<EmailReport>,
 }
 
 impl DomainReport {
     pub fn build(
         domain: String,
         resolved_ip: Option<IpAddr>,
-        tls: TlsFacts,
+        tls: TlsState,
         evidence: Evidence,
+        email: Option<EmailReport>,
         checked_at: DateTime<Local>,
     ) -> Self {
-        let signals = evidence.signals(&domain);
-        let termination = Signals::aggregate(&signals);
-        let ownership = evidence.infra_ownership(&domain);
-        let verdict = verdict_of(termination.operator, tls.is_pq(), ownership);
+        let infrastructure = attribute_infrastructure(&evidence, &domain);
+        let mut termination = termination_role(&evidence, &domain);
+        let verdict = match &tls {
+            TlsState::Unavailable => Verdict::TlsUnavailable,
+            TlsState::Tls(session) => {
+                if termination.role == TerminationRole::Unproven {
+                    termination.confidence = infrastructure.confidence;
+                }
+                verdict_of(&infrastructure, &termination, session.is_pq())
+            }
+        };
         Self {
             domain,
             checked_at,
             resolved_ip,
             tls,
             evidence,
+            infrastructure,
             termination,
             verdict,
+            email,
         }
     }
 }
 
-pub fn determine_operator(signals: &[Signal]) -> Option<Operator> {
-    if signals.is_empty() {
-        return None;
-    }
-
-    let mut operator_counts: HashMap<Operator, HashSet<EvidenceClass>> = HashMap::new();
-    for signal in signals {
-        operator_counts
-            .entry(signal.operator)
-            .or_default()
-            .insert(signal.kind.class());
-    }
-
-    let max_classes = operator_counts.values().map(|s| s.len()).max().unwrap_or(0);
-    let winners: Vec<Operator> = operator_counts
-        .iter()
-        .filter(|(_, classes)| classes.len() == max_classes)
-        .map(|(operator, _)| *operator)
-        .collect();
-
-    if max_classes >= 2 {
-        if winners.len() == 1 {
-            Some(winners[0])
-        } else {
-            None
+pub fn verdict_of(infrastructure: &Infrastructure, termination: &Termination, pq: bool) -> Verdict {
+    match termination.role {
+        TerminationRole::Edge => {
+            if pq {
+                Verdict::PqAtEdge
+            } else {
+                Verdict::NoPqAtEdge
+            }
         }
-    } else if signals.len() == 1 {
-        Some(signals[0].operator)
-    } else if operator_counts.len() == 1 {
-        Some(winners[0])
-    } else {
-        None
-    }
-}
-
-pub fn confidence_of(operator: Option<Operator>, class_count: usize) -> Confidence {
-    match (operator, class_count) {
-        (Some(_), n) if n >= 2 => Confidence::Confirmed,
-        (Some(_), 1) => Confidence::Probable,
-        (None, 0) => Confidence::None,
-        _ => Confidence::Undecided,
-    }
-}
-
-pub fn verdict_of(termination: Option<Operator>, pq: bool, ownership: InfraOwnership) -> Verdict {
-    match (termination, pq, ownership) {
-        (Some(Operator::Vendor(vendor)), true, _) if vendor.is_cloud() => Verdict::PqCloudHosted,
-        (Some(Operator::Vendor(vendor)), false, _) if vendor.is_cloud() => Verdict::NoPqCloudHosted,
-        (Some(Operator::Vendor(_)), true, _) => Verdict::PqAtEdge,
-        (Some(Operator::Vendor(_)), false, _) => Verdict::NoPqEdge,
-        (Some(Operator::Own), true, _) => Verdict::PqOwnInfra,
-        (Some(Operator::Own), false, _) => Verdict::NoPqOwnInfra,
-        (None, true, InfraOwnership::ThirdParty) => Verdict::PqVendorHosted,
-        (None, false, InfraOwnership::ThirdParty) => Verdict::NoPqVendorHosted,
-        (None, true, _) => Verdict::PqOwnInfra,
-        (None, false, _) => Verdict::NoPqOwnInfra,
+        TerminationRole::LikelyEdge => {
+            if pq {
+                Verdict::PqLikelyAtEdge
+            } else {
+                Verdict::NoPqLikelyAtEdge
+            }
+        }
+        TerminationRole::Unproven => match infrastructure.owner {
+            InfraOwner::Organization => {
+                if pq {
+                    Verdict::PqOnOrgInfra
+                } else {
+                    Verdict::NoPqOnOrgInfra
+                }
+            }
+            InfraOwner::ThirdParty => {
+                if pq {
+                    Verdict::PqOnThirdPartyInfra
+                } else {
+                    Verdict::NoPqOnThirdPartyInfra
+                }
+            }
+            InfraOwner::Unknown => {
+                if pq {
+                    Verdict::PqUnattributed
+                } else {
+                    Verdict::NoPqUnattributed
+                }
+            }
+        },
     }
 }
 
@@ -663,6 +763,7 @@ pub fn fixture() -> DomainReport {
         cert: Some(CertEvidence {
             vendor: None,
             name: "www.citi.com".to_string(),
+            names: vec!["www.citi.com".to_string(), "citibankonline.pl".to_string()],
         }),
         http: Some(HttpEvidence {
             header: "X-Akamai-Request-ID".to_string(),
@@ -684,11 +785,15 @@ pub fn fixture() -> DomainReport {
     DomainReport::build(
         "citibankonline.pl".to_string(),
         Some("104.96.178.165".parse().unwrap()),
-        TlsFacts {
-            kx_group: "X25519".to_string(),
-            symmetric_alg: SymmetricAlg::Aes256,
-        },
+        TlsState::Tls(TlsSession {
+            version: "TLS 1.2".to_string(),
+            facts: TlsFacts {
+                kx_group: "X25519".to_string(),
+                symmetric_alg: SymmetricAlg::Aes256,
+            },
+        }),
         evidence,
+        None,
         Local::now(),
     )
 }
@@ -698,197 +803,148 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evidence_slots_become_signals_only_when_attributed() {
+    fn range_evidence_identifies_the_provider_and_counts_third_party() {
         let evidence = Evidence {
-            cname: Some(CnameEvidence {
-                chain: vec!["cdn.example.net".to_string()],
-                vendor: None,
-            }),
             range: Some(RangeEvidence {
                 cidr: "104.16.0.0/12".to_string(),
                 vendor: Vendor::Cloudflare,
             }),
-            cert: Some(CertEvidence {
-                name: "www.example.com".to_string(),
-                vendor: None,
-            }),
-            http: None,
-            ptr: None,
-            rdap: None,
-            asn: Some(AsnEvidence {
-                asn: "AS64512 EXAMPLE-CORP-AS".to_string(),
-                vendor: None,
-            }),
+            ..Default::default()
         };
-        let signals = evidence.signals("pqpulse.dev");
-        assert_eq!(signals.len(), 1);
-        assert_eq!(signals[0].kind, SignalType::Range);
-        assert_eq!(signals[0].operator, Operator::Vendor(Vendor::Cloudflare));
-    }
+        let infra = attribute_infrastructure(&evidence, "pqpulse.dev");
+        assert_eq!(infra.owner, InfraOwner::ThirdParty);
+        assert_eq!(infra.provider.as_deref(), Some("Cloudflare"));
+        assert_eq!(infra.third_party_score, 4);
+        assert_eq!(infra.confidence, Confidence::Confirmed);
 
-    #[test]
-    fn ptr_and_rdap_are_one_evidence_class() {
-        let signals = vec![
-            Signal {
-                kind: SignalType::Ptr,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-            Signal {
-                kind: SignalType::Rdap,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-        ];
-        let aggregate = Signals::aggregate(&signals);
-        assert_eq!(aggregate.operator, Some(Operator::Vendor(Vendor::Akamai)));
-        assert_eq!(aggregate.confidence, Confidence::Probable);
-        assert_eq!(aggregate.signal_count, 2);
-        assert_eq!(aggregate.class_count, 1);
-    }
-
-    #[test]
-    fn conflicting_single_class_signals_are_undecided() {
-        let signals = vec![
-            Signal {
-                kind: SignalType::Ptr,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-            Signal {
-                kind: SignalType::Cname,
-                operator: Operator::Vendor(Vendor::Cloudflare),
-            },
-        ];
-        assert_eq!(determine_operator(&signals), None);
-    }
-
-    #[test]
-    fn two_agreeing_classes_are_confirmed() {
-        let signals = vec![
-            Signal {
-                kind: SignalType::Cname,
-                operator: Operator::Vendor(Vendor::Cloudflare),
-            },
-            Signal {
-                kind: SignalType::Range,
-                operator: Operator::Vendor(Vendor::Cloudflare),
-            },
-        ];
-        let aggregate = Signals::aggregate(&signals);
+        let termination = termination_role(&evidence, "pqpulse.dev");
+        assert_eq!(termination.role, TerminationRole::LikelyEdge);
+        assert_eq!(termination.edge_classes, vec![EdgeSignal::Range]);
         assert_eq!(
-            aggregate.operator,
-            Some(Operator::Vendor(Vendor::Cloudflare))
+            verdict_of(&infra, &termination, true),
+            Verdict::PqLikelyAtEdge
         );
-        assert_eq!(aggregate.confidence, Confidence::Confirmed);
     }
 
     #[test]
-    fn asn_corroborates_rdap_without_a_new_evidence_class() {
-        let ptr_rdap = vec![
-            Signal {
-                kind: SignalType::Ptr,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-            Signal {
-                kind: SignalType::Rdap,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-        ];
-        let with_asn = ptr_rdap
-            .iter()
-            .copied()
-            .chain([Signal {
-                kind: SignalType::Asn,
-                operator: Operator::Vendor(Vendor::Akamai),
-            }])
-            .collect::<Vec<_>>();
-
-        assert_eq!(SignalType::Asn.class(), SignalType::Ptr.class());
-        let without = Signals::aggregate(&ptr_rdap);
-        let with = Signals::aggregate(&with_asn);
-        assert_eq!(without.class_count, 1);
-        assert_eq!(with.class_count, 1, "ASN must not add a third-party class");
-        assert_eq!(with.signal_count, 3);
-        assert_eq!(with.operator, Some(Operator::Vendor(Vendor::Akamai)));
-        assert_eq!(with.confidence, Confidence::Probable);
-    }
-
-    #[test]
-    fn http_edge_processing_is_its_own_evidence_class() {
-        assert_eq!(SignalType::Http.class(), EvidenceClass::EdgeProcessing);
-        let signals = vec![
-            Signal {
-                kind: SignalType::Ptr,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-            Signal {
-                kind: SignalType::Rdap,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-            Signal {
-                kind: SignalType::Asn,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-            Signal {
-                kind: SignalType::Http,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-        ];
-        let aggregate = Signals::aggregate(&signals);
-        assert_eq!(aggregate.class_count, 2);
-        assert_eq!(aggregate.confidence, Confidence::Confirmed);
-    }
-
-    #[test]
-    fn unresolved_evidence_is_neutral() {
+    fn ovh_network_is_third_party_infrastructure_never_an_edge() {
         let evidence = Evidence {
-            cname: None,
-            range: None,
-            cert: Some(CertEvidence {
-                name: "www.example.com".to_string(),
+            ptr: Some(PtrEvidence {
+                record: "mail.krakowski.pinb.gov.pl".to_string(),
                 vendor: None,
             }),
-            http: None,
-            ptr: None,
             rdap: Some(RdapEvidence {
-                netname: "XYZ-CORP".to_string(),
+                netname: "OVH-DEDICATED-FO".to_string(),
                 vendor: None,
             }),
             asn: Some(AsnEvidence {
-                asn: "AS64512 XYZ-CORP-AS".to_string(),
+                asn: "AS16276 OVH".to_string(),
                 vendor: None,
             }),
+            ..Default::default()
         };
-        assert!(evidence.signals("pqpulse.dev").is_empty());
+        let infra = attribute_infrastructure(&evidence, "mail.krakowski.pinb.gov.pl");
+        assert_eq!(infra.owner, InfraOwner::ThirdParty);
+        assert_eq!(infra.provider.as_deref(), Some("OVH"));
+        assert_eq!(infra.org_score, 1);
+        assert_eq!(infra.third_party_score, 7);
 
-        let report = DomainReport::build(
-            "pqpulse.dev".to_string(),
-            Some("192.0.2.10".parse().unwrap()),
-            TlsFacts {
-                kx_group: "X25519".to_string(),
-                symmetric_alg: SymmetricAlg::Aes256,
-            },
-            evidence,
-            Local::now(),
+        let termination = termination_role(&evidence, "mail.krakowski.pinb.gov.pl");
+        assert_eq!(termination.role, TerminationRole::Unproven);
+        assert!(termination.edge_classes.is_empty());
+        assert_eq!(
+            verdict_of(&infra, &termination, false),
+            Verdict::NoPqOnThirdPartyInfra
         );
-        assert_eq!(report.termination.operator, None);
-        assert_eq!(report.termination.confidence, Confidence::None);
-        assert_eq!(report.verdict, Verdict::NoPqOwnInfra);
+        assert_eq!(
+            verdict_of(&infra, &termination, true),
+            Verdict::PqOnThirdPartyInfra
+        );
     }
 
     #[test]
-    fn own_zone_evidence_attributes_to_the_scanned_organization() {
+    fn provider_identity_alone_never_proves_edge_role() {
+        let evidence = Evidence {
+            asn: Some(AsnEvidence {
+                asn: "AS15169 GOOGLE-CLOUD-PLATFORM".to_string(),
+                vendor: Some(Vendor::GoogleCloud),
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "example.com");
+        assert_eq!(infra.owner, InfraOwner::ThirdParty);
+        assert_eq!(infra.provider.as_deref(), Some("Google Cloud"));
+
+        let termination = termination_role(&evidence, "example.com");
+        assert!(termination.edge_classes.is_empty());
+        assert_eq!(termination.role, TerminationRole::Unproven);
+    }
+
+    #[test]
+    fn two_edge_classes_confirm_edge_termination() {
+        let evidence = Evidence {
+            range: Some(RangeEvidence {
+                cidr: "104.16.0.0/12".to_string(),
+                vendor: Vendor::Cloudflare,
+            }),
+            http: Some(HttpEvidence {
+                header: "X-Akamai-Request-ID".to_string(),
+                vendor: Vendor::Akamai,
+            }),
+            ..Default::default()
+        };
+        let termination = termination_role(&evidence, "example.com");
+        assert_eq!(termination.role, TerminationRole::Edge);
+        assert_eq!(termination.confidence, Confidence::Confirmed);
+        assert_eq!(
+            termination.edge_classes,
+            vec![EdgeSignal::Range, EdgeSignal::Http]
+        );
+    }
+
+    #[test]
+    fn weak_alone_signals_stay_unproven() {
+        let evidence = Evidence {
+            cert: Some(CertEvidence {
+                name: "edge.example.com.akamaiedge.net".to_string(),
+                vendor: None,
+                names: vec!["edge.example.com.akamaiedge.net".to_string()],
+            }),
+            ..Default::default()
+        };
+        let termination = termination_role(&evidence, "example.com");
+        assert_eq!(termination.edge_classes, vec![EdgeSignal::Cert]);
+        assert_eq!(termination.role, TerminationRole::Unproven);
+    }
+
+    #[test]
+    fn a_single_strong_signal_is_likely_edge() {
         let evidence = Evidence {
             cname: Some(CnameEvidence {
-                chain: vec!["upload.allegro.pl".to_string()],
-                vendor: None,
+                chain: vec![
+                    "www.example.com.edgekey.net".to_string(),
+                    "e970.dspg.akamaiedge.net".to_string(),
+                ],
+                vendor: Some(Vendor::Akamai),
             }),
-            range: None,
-            cert: Some(CertEvidence {
-                name: "edge.business.allegro.pl".to_string(),
-                vendor: None,
-            }),
-            http: None,
+            ..Default::default()
+        };
+        let termination = termination_role(&evidence, "www.example.com");
+        assert_eq!(termination.edge_classes, vec![EdgeSignal::Cname]);
+        assert_eq!(termination.role, TerminationRole::LikelyEdge);
+        assert_eq!(termination.confidence, Confidence::Probable);
+        let infra = attribute_infrastructure(&evidence, "www.example.com");
+        assert_eq!(
+            verdict_of(&infra, &termination, true),
+            Verdict::PqLikelyAtEdge
+        );
+    }
+
+    #[test]
+    fn org_zone_dns_and_netname_attribute_to_the_organization() {
+        let evidence = Evidence {
             ptr: Some(PtrEvidence {
-                record: "upload.allegro.com.cz".to_string(),
+                record: "www.allegro.pl".to_string(),
                 vendor: None,
             }),
             rdap: Some(RdapEvidence {
@@ -899,293 +955,123 @@ mod tests {
                 asn: "AS42656 QXL-POLAND".to_string(),
                 vendor: None,
             }),
+            ..Default::default()
         };
-        let signals = evidence.signals("upload.allegro.pl");
-        assert_eq!(signals.len(), 2);
-        assert!(signals.iter().all(|s| s.operator == Operator::Own));
-
-        let report = DomainReport::build(
-            "upload.allegro.pl".to_string(),
-            Some("192.0.2.10".parse().unwrap()),
-            TlsFacts {
-                kx_group: "X25519".to_string(),
-                symmetric_alg: SymmetricAlg::Aes256,
-            },
-            evidence,
-            Local::now(),
-        );
-        assert_eq!(report.termination.operator, Some(Operator::Own));
-        assert_eq!(report.termination.signal_count, 2);
-        assert_eq!(report.termination.class_count, 2);
-        assert_eq!(report.termination.confidence, Confidence::Confirmed);
-        assert_eq!(report.verdict, Verdict::NoPqOwnInfra);
+        let infra = attribute_infrastructure(&evidence, "www.allegro.pl");
+        assert_eq!(infra.owner, InfraOwner::Organization);
+        assert_eq!(infra.provider, None);
+        assert_eq!(infra.org_score, 4);
+        assert_eq!(infra.third_party_score, 0);
+        assert_eq!(infra.confidence, Confidence::Confirmed);
     }
 
     #[test]
-    fn cert_names_do_not_attribute_own_infrastructure() {
+    fn a_lone_own_zone_ptr_is_too_weak_to_attribute() {
         let evidence = Evidence {
-            cert: Some(CertEvidence {
-                name: "edge.business.allegro.pl".to_string(),
+            ptr: Some(PtrEvidence {
+                record: "www.example.com".to_string(),
                 vendor: None,
             }),
             ..Default::default()
         };
-        assert!(evidence.signals("upload.allegro.pl").is_empty());
+        let infra = attribute_infrastructure(&evidence, "www.example.com");
+        assert_eq!(infra.owner, InfraOwner::Unknown);
+        assert_eq!(infra.confidence, Confidence::None);
+        let termination = termination_role(&evidence, "www.example.com");
+        assert_eq!(
+            verdict_of(&infra, &termination, true),
+            Verdict::PqUnattributed
+        );
     }
 
     #[test]
-    fn mixed_attribution_resolves_to_the_majority_operator() {
-        let signals = vec![
-            Signal {
-                kind: SignalType::Cname,
-                operator: Operator::Own,
-            },
-            Signal {
-                kind: SignalType::Asn,
-                operator: Operator::Own,
-            },
-            Signal {
-                kind: SignalType::Http,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-        ];
-        let aggregate = Signals::aggregate(&signals);
-        assert_eq!(aggregate.operator, Some(Operator::Own));
-        assert_eq!(aggregate.signal_count, 2);
-        assert_eq!(aggregate.class_count, 2);
-        assert_eq!(aggregate.confidence, Confidence::Confirmed);
+    fn tied_scores_stay_unknown() {
+        let evidence = Evidence {
+            ptr: Some(PtrEvidence {
+                record: "host.fov.club".to_string(),
+                vendor: None,
+            }),
+            rdap: Some(RdapEvidence {
+                netname: "EXAMPLE-NET".to_string(),
+                vendor: None,
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "www.example.com");
+        assert_eq!(infra.owner, InfraOwner::Unknown);
     }
 
     #[test]
-    fn cname_evidence_matches_vendor_anywhere_in_the_chain() {
+    fn cname_delegation_counts_double_for_third_parties() {
         let evidence = Evidence {
             cname: Some(CnameEvidence {
-                chain: vec![
-                    "www.example.com.glb.example.org".to_string(),
-                    "www.example.com.edgekey.net".to_string(),
-                    "e970.dspg.akamaiedge.net".to_string(),
-                ],
-                vendor: Some(Vendor::Akamai),
+                chain: vec!["cdn.vendor.example.net".to_string()],
+                vendor: None,
             }),
             ..Default::default()
         };
-        let signals = evidence.signals("www.example.com");
-        assert_eq!(signals.len(), 1);
-        assert_eq!(signals[0].kind, SignalType::Cname);
-        assert_eq!(signals[0].operator, Operator::Vendor(Vendor::Akamai));
-    }
+        let infra = attribute_infrastructure(&evidence, "www.example.com");
+        assert_eq!(infra.third_party_score, 2);
 
-    #[test]
-    fn tied_attribution_reports_candidates() {
-        let signals = vec![
-            Signal {
-                kind: SignalType::Cname,
-                operator: Operator::Vendor(Vendor::Cloudflare),
-            },
-            Signal {
-                kind: SignalType::Range,
-                operator: Operator::Vendor(Vendor::Cloudflare),
-            },
-            Signal {
-                kind: SignalType::Ptr,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-            Signal {
-                kind: SignalType::Http,
-                operator: Operator::Vendor(Vendor::Akamai),
-            },
-        ];
-        let aggregate = Signals::aggregate(&signals);
-        assert_eq!(aggregate.operator, None);
+        let own = Evidence {
+            cname: Some(CnameEvidence {
+                chain: vec!["cdn.example.com".to_string()],
+                vendor: None,
+            }),
+            ..Default::default()
+        };
         assert_eq!(
-            aggregate.candidates,
-            vec![
-                Operator::Vendor(Vendor::Cloudflare),
-                Operator::Vendor(Vendor::Akamai)
-            ]
-        );
-        assert_eq!(aggregate.confidence, Confidence::Undecided);
-    }
-
-    #[test]
-    fn verdicts_follow_termination_and_pq() {
-        assert_eq!(
-            verdict_of(
-                Some(Operator::Vendor(Vendor::Akamai)),
-                true,
-                InfraOwnership::Unknown
-            ),
-            Verdict::PqAtEdge
-        );
-        assert_eq!(
-            verdict_of(
-                Some(Operator::Vendor(Vendor::Azure)),
-                true,
-                InfraOwnership::Unknown
-            ),
-            Verdict::PqCloudHosted
-        );
-        assert_eq!(
-            verdict_of(None, true, InfraOwnership::ThirdParty),
-            Verdict::PqVendorHosted
-        );
-        assert_eq!(
-            verdict_of(None, true, InfraOwnership::Own),
-            Verdict::PqOwnInfra
-        );
-        assert_eq!(
-            verdict_of(Some(Operator::Own), true, InfraOwnership::Own),
-            Verdict::PqOwnInfra
-        );
-        assert_eq!(
-            verdict_of(
-                Some(Operator::Vendor(Vendor::Azure)),
-                false,
-                InfraOwnership::Unknown
-            ),
-            Verdict::NoPqCloudHosted
-        );
-        assert_eq!(
-            verdict_of(
-                Some(Operator::Vendor(Vendor::Link11)),
-                false,
-                InfraOwnership::Unknown
-            ),
-            Verdict::NoPqEdge
-        );
-        assert_eq!(
-            verdict_of(None, false, InfraOwnership::ThirdParty),
-            Verdict::NoPqVendorHosted
-        );
-        assert_eq!(
-            verdict_of(None, false, InfraOwnership::Unknown),
-            Verdict::NoPqOwnInfra
-        );
-        assert_eq!(
-            verdict_of(Some(Operator::Own), false, InfraOwnership::Own),
-            Verdict::NoPqOwnInfra
+            attribute_infrastructure(&own, "www.example.com").org_score,
+            1
         );
     }
 
     #[test]
-    fn foreign_infra_is_vendor_hosted_not_own() {
+    fn cert_names_never_attribute_ownership_but_edge_namespace_is_role_evidence() {
         let evidence = Evidence {
             cert: Some(CertEvidence {
-                name: "e-zamowienia.nbp.pl".to_string(),
+                name: "mail.example.com".to_string(),
                 vendor: None,
-            }),
-            ptr: Some(PtrEvidence {
-                record: "195.205.148.130.marketplanet.pl".to_string(),
-                vendor: None,
-            }),
-            rdap: Some(RdapEvidence {
-                netname: "OTWARTY-RYNEK-ELEKTRONICZNY".to_string(),
-                vendor: None,
+                names: vec!["mail.example.com".to_string()],
             }),
             ..Default::default()
         };
-        let report = DomainReport::build(
-            "e-zamowienia.nbp.pl".to_string(),
-            Some("195.205.148.130".parse().unwrap()),
-            TlsFacts {
-                kx_group: "X25519".to_string(),
-                symmetric_alg: SymmetricAlg::Aes128,
-            },
-            evidence,
-            Local::now(),
+        assert_eq!(
+            attribute_infrastructure(&evidence, "mail.example.com").owner,
+            InfraOwner::Unknown
         );
-        assert_eq!(report.verdict, Verdict::NoPqVendorHosted);
+        assert!(
+            termination_role(&evidence, "mail.example.com")
+                .edge_classes
+                .is_empty()
+        );
     }
 
     #[test]
-    fn same_zone_infra_stays_own() {
-        let evidence = Evidence {
-            ptr: Some(PtrEvidence {
-                record: "online.bankmillennium.pl".to_string(),
-                vendor: None,
-            }),
-            rdap: Some(RdapEvidence {
-                netname: "BBG-PL".to_string(),
-                vendor: None,
-            }),
-            ..Default::default()
-        };
-        let report = DomainReport::build(
-            "online.bankmillennium.pl".to_string(),
-            Some("193.201.167.52".parse().unwrap()),
-            TlsFacts {
-                kx_group: "X25519".to_string(),
-                symmetric_alg: SymmetricAlg::Aes256,
-            },
-            evidence,
-            Local::now(),
-        );
-        assert_eq!(report.verdict, Verdict::NoPqOwnInfra);
+    fn fixture_terminates_at_akamai_edge() {
+        let report = fixture();
+        assert_eq!(report.termination.role, TerminationRole::Edge);
+        assert_eq!(report.termination.confidence, Confidence::Confirmed);
+        assert!(!report.termination.edge_classes.is_empty());
+        assert_eq!(report.verdict, Verdict::NoPqAtEdge);
+        match &report.tls {
+            TlsState::Tls(session) => assert!(!session.is_pq()),
+            TlsState::Unavailable => panic!("fixture must have TLS"),
+        }
     }
 
     #[test]
-    fn infra_ownership_tracks_zones_and_netnames() {
-        let evidence = |cname: Option<&[&str]>, ptr: Option<&str>, rdap: Option<&str>| Evidence {
-            cname: cname.map(|chain| CnameEvidence {
-                chain: chain.iter().map(|t| t.to_string()).collect(),
-                vendor: None,
-            }),
-            ptr: ptr.map(|r| PtrEvidence {
-                record: r.to_string(),
-                vendor: None,
-            }),
-            rdap: rdap.map(|n| RdapEvidence {
-                netname: n.to_string(),
-                vendor: None,
-            }),
-            ..Default::default()
-        };
-        // PTR inside the domain's own zone.
-        assert_eq!(
-            evidence(None, Some("online.bankmillennium.pl"), Some("BBG-PL"))
-                .infra_ownership("online.bankmillennium.pl"),
-            InfraOwnership::Own
+    fn tls_unavailable_verdict_is_independent_of_attribution() {
+        let report = DomainReport::build(
+            "gorlice.pinb.gov.pl".to_string(),
+            None,
+            TlsState::Unavailable,
+            Evidence::default(),
+            None,
+            Local::now(),
         );
-        // RDAP netname naming the registrable label.
-        assert_eq!(
-            evidence(None, None, Some("ZUS")).infra_ownership("www.zus.pl"),
-            InfraOwnership::Own
-        );
-        // CNAME delegation to another zone of the same operator.
-        assert_eq!(
-            evidence(Some(&["online.global.mbank.pl"]), None, Some("PL-MBANKPL"))
-                .infra_ownership("online.mbank.pl"),
-            InfraOwnership::Own
-        );
-        // PTR in a foreign zone.
-        assert_eq!(
-            evidence(None, Some("195.205.148.130.marketplanet.pl"), None)
-                .infra_ownership("e-zamowienia.nbp.pl"),
-            InfraOwnership::ThirdParty
-        );
-        // CNAME into a foreign zone.
-        assert_eq!(
-            evidence(Some(&["fe.edelivery.sni.certum.pl"]), None, None)
-                .infra_ownership("erds.envelo.pl"),
-            InfraOwnership::ThirdParty
-        );
-        // PTR in a foreign zone, but RDAP names the operator: sibling
-        // zones of the same organization are not third-party hosting.
-        assert_eq!(
-            evidence(None, Some("upload.allegro.com.cz"), Some("ALLEGRO-NET"))
-                .infra_ownership("upload.allegro.pl"),
-            InfraOwnership::Own
-        );
-        // Netname that does not echo the registrable label proves nothing.
-        assert_eq!(
-            evidence(None, None, Some("PL-PKOBP")).infra_ownership("ipko.pl"),
-            InfraOwnership::Unknown
-        );
-        // No infra evidence at all.
-        assert_eq!(
-            evidence(None, None, None).infra_ownership("example.com"),
-            InfraOwnership::Unknown
-        );
+        assert_eq!(report.verdict, Verdict::TlsUnavailable);
+        assert_eq!(report.verdict.as_str(), "tls_unavailable");
     }
 
     #[test]
@@ -1209,19 +1095,5 @@ mod tests {
         );
         assert_eq!(registrable_zone("pl").as_deref(), None);
         assert_eq!(registrable_zone("localhost").as_deref(), None);
-    }
-
-    #[test]
-    fn fixture_attributes_akamai() {
-        let report = fixture();
-        assert_eq!(
-            report.termination.operator,
-            Some(Operator::Vendor(Vendor::Akamai))
-        );
-        assert_eq!(report.termination.confidence, Confidence::Confirmed);
-        assert_eq!(report.termination.signal_count, 4);
-        assert_eq!(report.termination.class_count, 2);
-        assert_eq!(report.verdict, Verdict::NoPqEdge);
-        assert!(!report.tls.is_pq());
     }
 }

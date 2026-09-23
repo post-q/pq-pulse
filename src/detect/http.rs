@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::model::HttpEvidence;
 
-use super::vendors::match_http_header_vendor;
+use crate::providers::match_http_header_vendor;
 
 /// Akamai diagnostic request headers: with these enabled the edge echoes
 /// back vendor-specific response headers. Non-Akamai servers ignore them.

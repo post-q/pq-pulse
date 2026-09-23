@@ -6,10 +6,11 @@ use std::time::Duration;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{
-    ClientConfig, ClientConnection, DigitallySignedStruct, Error, SignatureScheme, StreamOwned,
+    ClientConfig, ClientConnection, DigitallySignedStruct, Error, ProtocolVersion, SignatureScheme,
+    StreamOwned,
 };
 
-use crate::model::{SymmetricAlg, TlsFacts};
+use crate::model::{SymmetricAlg, TlsFacts, TlsSession};
 
 use super::DetectError;
 
@@ -78,52 +79,101 @@ impl ServerCertVerifier for CertCapturingVerifier {
     }
 }
 
-/// Handshake plus HTTP proof; returns negotiated facts and the captured cert.
-pub(crate) fn probe(host: &str) -> Result<(TlsFacts, Option<Vec<u8>>), DetectError> {
-    let verifier = Arc::new(CertCapturingVerifier::new());
+struct TlsProbe {
+    stream: StreamOwned<ClientConnection, TcpStream>,
+    verifier: Arc<CertCapturingVerifier>,
+}
 
-    let config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier.clone())
-        .with_no_client_auth();
+impl TlsProbe {
+    fn new(sock: TcpStream, host: &str) -> Result<Self, DetectError> {
+        let verifier = Arc::new(CertCapturingVerifier::new());
 
-    let server_name = ServerName::try_from(host)?.to_owned();
-    let conn = ClientConnection::new(Arc::new(config), server_name)?;
-    let sock = TcpStream::connect((host, 443))?;
-    sock.set_read_timeout(Some(Duration::from_secs(5)))?;
-    sock.set_write_timeout(Some(Duration::from_secs(5)))?;
-    let mut tls = StreamOwned::new(conn, sock);
+        let config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(verifier.clone())
+            .with_no_client_auth();
 
-    while tls.conn.is_handshaking() {
-        tls.conn.complete_io(&mut tls.sock)?;
+        let server_name = ServerName::try_from(host)?.to_owned();
+        let conn = ClientConnection::new(Arc::new(config), server_name)?;
+        Ok(Self {
+            stream: StreamOwned::new(conn, sock),
+            verifier,
+        })
     }
 
-    let kx_group = tls
-        .conn
-        .negotiated_key_exchange_group()
-        .map(|g| format!("{:?}", g.name()))
-        .unwrap_or_else(|| "<none>".to_string());
+    fn complete_handshake(&mut self) -> Result<(), DetectError> {
+        while self.stream.conn.is_handshaking() {
+            self.stream.conn.complete_io(&mut self.stream.sock)?;
+        }
+        Ok(())
+    }
 
-    let cs = tls
-        .conn
-        .negotiated_cipher_suite()
-        .map(|cs| format!("{:?}", cs.suite()))
-        .unwrap_or_else(|| "<none>".to_string());
+    fn outcome(&self) -> (TlsSession, Option<Vec<u8>>) {
+        let kx_group = self
+            .stream
+            .conn
+            .negotiated_key_exchange_group()
+            .map(|g| format!("{:?}", g.name()))
+            .unwrap_or_else(|| "<none>".to_string());
 
-    let facts = TlsFacts {
-        kx_group,
-        symmetric_alg: SymmetricAlg::from_suite_name(&cs),
-    };
+        let cs = self
+            .stream
+            .conn
+            .negotiated_cipher_suite()
+            .map(|cs| format!("{:?}", cs.suite()))
+            .unwrap_or_else(|| "<none>".to_string());
 
-    let cert = verifier.cert.lock().unwrap().take();
+        let session = TlsSession {
+            version: tls_version_name(self.stream.conn.protocol_version()).to_string(),
+            facts: TlsFacts {
+                kx_group,
+                symmetric_alg: SymmetricAlg::from_suite_name(&cs),
+            },
+        };
+        (session, self.verifier.cert.lock().unwrap().take())
+    }
+}
+
+fn tls_version_name(version: Option<ProtocolVersion>) -> &'static str {
+    match version {
+        Some(ProtocolVersion::TLSv1_3) => "TLS 1.3",
+        Some(ProtocolVersion::TLSv1_2) => "TLS 1.2",
+        Some(ProtocolVersion::TLSv1_1) => "TLS 1.1",
+        Some(ProtocolVersion::TLSv1_0) => "TLS 1.0",
+        Some(_) => "other",
+        None => "<none>",
+    }
+}
+
+fn with_timeouts(sock: TcpStream) -> Result<TcpStream, DetectError> {
+    sock.set_read_timeout(Some(Duration::from_secs(5)))?;
+    sock.set_write_timeout(Some(Duration::from_secs(5)))?;
+    Ok(sock)
+}
+
+pub(crate) fn upgrade(
+    sock: TcpStream,
+    host: &str,
+) -> Result<(TlsSession, Option<Vec<u8>>), DetectError> {
+    let mut probe = TlsProbe::new(with_timeouts(sock)?, host)?;
+    probe.complete_handshake()?;
+    Ok(probe.outcome())
+}
+
+pub(crate) fn probe(host: &str) -> Result<(TlsSession, Option<Vec<u8>>), DetectError> {
+    let sock = TcpStream::connect((host, 443))?;
+    let mut probe = TlsProbe::new(with_timeouts(sock)?, host)?;
+    probe.complete_handshake()?;
+
+    let (session, cert) = probe.outcome();
 
     let req = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    tls.write_all(req.as_bytes())?;
+    probe.stream.write_all(req.as_bytes())?;
 
     let mut buf = [0u8; 8192];
     let mut resp = Vec::new();
     loop {
-        match tls.read(&mut buf) {
+        match probe.stream.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 resp.extend_from_slice(&buf[..n]);
@@ -144,5 +194,18 @@ pub(crate) fn probe(host: &str) -> Result<(TlsFacts, Option<Vec<u8>>), DetectErr
         }
     }
 
-    Ok((facts, cert))
+    Ok((session, cert))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_versions_get_stable_display_names() {
+        assert_eq!(tls_version_name(Some(ProtocolVersion::TLSv1_3)), "TLS 1.3");
+        assert_eq!(tls_version_name(Some(ProtocolVersion::TLSv1_2)), "TLS 1.2");
+        assert_eq!(tls_version_name(Some(ProtocolVersion::TLSv1_0)), "TLS 1.0");
+        assert_eq!(tls_version_name(None), "<none>");
+    }
 }

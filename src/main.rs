@@ -1,5 +1,6 @@
 mod detect;
 mod model;
+mod providers;
 mod render;
 
 use std::env;

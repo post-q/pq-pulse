@@ -12,7 +12,7 @@ fn cache_path() -> PathBuf {
     std::env::temp_dir().join("pq-edge-ranges.json")
 }
 
-type VendorRanges = Vec<(Vendor, Vec<String>)>;
+pub(crate) type VendorRanges = Vec<(Vendor, Vec<String>)>;
 
 fn fetch_vendor_ranges() -> VendorRanges {
     let mut ranges: VendorRanges = Vec::new();

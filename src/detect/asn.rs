@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use crate::model::AsnEvidence;
 
 use super::dns::dig_txt;
-use super::vendors::match_vendor;
+use crate::providers::match_vendor;
 
 /// Origin ASN of the resolved IP via the Team Cymru DNS service, plus
 /// the AS name. Network-ownership attribution that corroborates PTR and
