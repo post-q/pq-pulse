@@ -51,25 +51,33 @@ tolerated.
 Text output (single domain):
 
 ```
-domain:        citibankonline.pl
-checked_at:    2026-09-21 10:32:17 +02:00
-resolved_ip:   104.94.222.171
-kx group:      X25519 (no PQ)
-symmetric_alg: AES256
+checked: 2026-09-25 17:31 +02:00
 
-evidence:
-  CNAME (none)
-  RANGE (none)
-  CERT  www.citi.com
-  HTTP  X-Akamai-Transformed -> Akamai
-  PTR   a104-94-222-171.deploy.static.akamaitechnologies.com -> Akamai
-  RDAP  AKAMAI -> Akamai
-  ASN   AS33905 AKAMAI-AMS -> Akamai
+WEB
+  endpoint
+    443/tcp      reachable
+    TLS          TLS 1.2
+    KX           X25519
+    symmetric    AES-256
+    PQ           no
 
-signals:
-  termination: Akamai (signals: 4, classes: 2, confidence: confirmed)
+  termination
+    provider     Akamai
 
-verdict:       no_pq_edge (The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed.)
+  network
+    IP           104.94.222.171
+    PTR          a104-94-222-171.deploy.static.akamaitechnologies.com
+    ASN          AS33905 AKAMAI-AMS
+    RDAP         AKAMAI
+
+
+MAIL
+  no MX records
+
+
+SUMMARY
+  web            classical TLS at Akamai edge
+  mail           no MX records
 ```
 
 ## Installation
