@@ -26,60 +26,9 @@ tolerated.
 
 ## What it reports
 
-- `TLS` / `KX` / `symmetric` / `PQ` — negotiated protocol version, key-exchange
-  group and symmetric suite. `X25519MLKEM768` is the post-quantum hybrid
-- 7 evidence slots — CNAME delegation chain, matched provider IP range,
-  certificate names (CN + SANs), HTTP edge headers, PTR, RDAP network
-  registration, origin ASN
-- `infrastructure` — who owns the network the endpoint sits on, from
-  independent signal classification against the scan target's identity
-  (derived once from the domain, e.g. `mbank.pl` → `mbank`): CNAME and PTR
-  zone membership, RDAP/AS identity match (normalized, with bounded
-  prefix/subset rules — no unrestricted substrings), certificate subject
-  names, vendor IP ranges. Signals are counted without weights:
-  ≥ 2 agreeing target signals (or ≥ 2 third-party signals) attribute
-  firmly, a lone signal leans (`possibly-*`), a mix of both sides is
-  `ambiguous`, nothing stays `unknown`. Confidence follows the count:
-  `none`, `weak`, `likely`, `confirmed`; contested evidence reports
-  `mixed`. The `provider` name is observed, not looked up from a list:
-  vendor aliases where known (Cloudflare, Akamai, Imperva, Fastly,
-  CloudFront, …), otherwise the identity agreed between the AS name and
-  the RDAP organization (e.g. `OVH` ↔ `OVH-DEDICATED-FO`)
-- `termination` — whether the TLS endpoint is a provider edge, independent of
-  who owns the network: provider identity alone is never role evidence
-  (an OVH ASN is hosting, an AWS ASN is not automatically edge). Edge
-  evidence: CNAME into a vendor edge namespace, IP in a documented edge
-  range, vendor HTTP edge headers, certificate names in an edge namespace,
-  an edge-vendor RDAP/AS name. Two independent classes → `edge`, one strong
-  class → `likely_edge`, otherwise `unproven`
-- `MAIL` — every published MX record (priority preserved), probed on TCP/25,
-  587 and 465 independently. 25/587 speak SMTP: banner, EHLO, STARTTLS
-  detection, in-place TLS upgrade; 465 is implicit TLS from the first byte.
-  `STARTTLS unavailable` is reported distinctly and is never a PQ verdict.
-  Domains without MX records are not probed
-- `SUMMARY` — one phrase for web, one rollup for mail. Mail delivery rides
-  on TCP/25 alone (`PQ enabled` → `classical TLS only` → `TLS failed` →
-  `no TLS` → `MX discovered; SMTP/25 unreachable from probe`); when 25 is
-  unreachable the summary keeps the attribution instead of collapsing to
-  `unreachable`
-
-| verdict | description |
-| --- | --- |
-| `pq_at_edge` | PQ or hybrid key exchange with at least two independent edge/CDN/WAF indications. |
-| `pq_likely_at_edge` | PQ or hybrid key exchange with one strong edge indication. |
-| `pq_on_org_infra` | PQ or hybrid key exchange on infrastructure attributed to the organization itself. |
-| `pq_on_third_party_infra` | PQ or hybrid key exchange on infrastructure attributed to a third party. |
-| `pq_unattributed` | PQ or hybrid key exchange; infrastructure could not be attributed. |
-| `classical_at_edge` | No PQ key exchange, with at least two independent edge/CDN/WAF indications. |
-| `classical_likely_at_edge` | No PQ key exchange, with one strong edge indication. |
-| `classical_on_org_infra` | No PQ key exchange on infrastructure attributed to the organization itself. |
-| `classical_on_third_party_infra` | No PQ key exchange on infrastructure attributed to a third party. |
-| `classical_unattributed` | No PQ key exchange; infrastructure could not be attributed. |
-| `tls_unavailable` | The HTTPS endpoint was unreachable; PQ status unknown. |
-
-Text output (single domain):
-
 ```
+$ ./pq-pulse nbp.pl
+
 nbp.pl
 checked: 2026-09-28 14:40 +02:00
 
@@ -142,9 +91,56 @@ SUMMARY
   mail           MX discovered; SMTP/25 unreachable from probe
 ```
 
-The `termination` block is printed only when its confidence is `confirmed`;
-otherwise the provider identity still appears in the SUMMARY phrase (e.g.
-`classical TLS on OVH infrastructure`).
+- `TLS` / `KX` / `symmetric` / `PQ` — negotiated protocol version, key-exchange
+  group and symmetric suite. `X25519MLKEM768` is the post-quantum hybrid
+- 7 evidence slots — CNAME delegation chain, matched provider IP range,
+  certificate names (CN + SANs), HTTP edge headers, PTR, RDAP network
+  registration, origin ASN
+- `infrastructure` — who owns the network the endpoint sits on, from
+  independent signal classification against the scan target's identity
+  (derived once from the domain, e.g. `mbank.pl` → `mbank`): CNAME and PTR
+  zone membership, RDAP/AS identity match (normalized, with bounded
+  prefix/subset rules — no unrestricted substrings), certificate subject
+  names, vendor IP ranges. Signals are counted without weights:
+  ≥ 2 agreeing target signals (or ≥ 2 third-party signals) attribute
+  firmly, a lone signal leans (`possibly-*`), a mix of both sides is
+  `ambiguous`, nothing stays `unknown`. Confidence follows the count:
+  `none`, `weak`, `likely`, `confirmed`; contested evidence reports
+  `mixed`. The `provider` name is observed, not looked up from a list:
+  vendor aliases where known (Cloudflare, Akamai, Imperva, Fastly,
+  CloudFront, …), otherwise the identity agreed between the AS name and
+  the RDAP organization (e.g. `OVH` ↔ `OVH-DEDICATED-FO`)
+- `termination` — whether the TLS endpoint is a provider edge, independent of
+  who owns the network: provider identity alone is never role evidence
+  (an OVH ASN is hosting, an AWS ASN is not automatically edge). Edge
+  evidence: CNAME into a vendor edge namespace, IP in a documented edge
+  range, vendor HTTP edge headers, certificate names in an edge namespace,
+  an edge-vendor RDAP/AS name. Two independent classes → `edge`, one strong
+  class → `likely_edge`, otherwise `unproven`
+- `MAIL` — every published MX record (priority preserved), probed on TCP/25,
+  587 and 465 independently. 25/587 speak SMTP: banner, EHLO, STARTTLS
+  detection, in-place TLS upgrade; 465 is implicit TLS from the first byte.
+  `STARTTLS unavailable` is reported distinctly and is never a PQ verdict.
+  Domains without MX records are not probed
+- `SUMMARY` — one phrase for web, one rollup for mail. Mail delivery rides
+  on TCP/25 alone (`PQ enabled` → `classical TLS only` → `TLS failed` →
+  `no TLS` → `MX discovered; SMTP/25 unreachable from probe`); when 25 is
+  unreachable the summary keeps the attribution instead of collapsing to
+  `unreachable`
+
+| verdict | description |
+| --- | --- |
+| `pq_at_edge` | PQ or hybrid key exchange with at least two independent edge/CDN/WAF indications. |
+| `pq_likely_at_edge` | PQ or hybrid key exchange with one strong edge indication. |
+| `pq_on_org_infra` | PQ or hybrid key exchange on infrastructure attributed to the organization itself. |
+| `pq_on_third_party_infra` | PQ or hybrid key exchange on infrastructure attributed to a third party. |
+| `pq_unattributed` | PQ or hybrid key exchange; infrastructure could not be attributed. |
+| `classical_at_edge` | No PQ key exchange, with at least two independent edge/CDN/WAF indications. |
+| `classical_likely_at_edge` | No PQ key exchange, with one strong edge indication. |
+| `classical_on_org_infra` | No PQ key exchange on infrastructure attributed to the organization itself. |
+| `classical_on_third_party_infra` | No PQ key exchange on infrastructure attributed to a third party. |
+| `classical_unattributed` | No PQ key exchange; infrastructure could not be attributed. |
+| `tls_unavailable` | The HTTPS endpoint was unreachable; PQ status unknown. |
 
 ## Installation
 
