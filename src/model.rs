@@ -3,6 +3,8 @@ use std::net::IpAddr;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 
+use crate::normalize::{Identity, display_name, matches_identity, normalize};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Vendor {
     Cloudflare,
@@ -83,7 +85,9 @@ impl std::fmt::Display for SymmetricAlg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confidence {
     Confirmed,
-    Probable,
+    Likely,
+    Weak,
+    Mixed,
     None,
 }
 
@@ -91,7 +95,9 @@ impl Confidence {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Confidence::Confirmed => "confirmed",
-            Confidence::Probable => "probable",
+            Confidence::Likely => "likely",
+            Confidence::Weak => "weak",
+            Confidence::Mixed => "mixed",
             Confidence::None => "none",
         }
     }
@@ -207,6 +213,7 @@ pub struct CertEvidence {
     pub vendor: Option<Vendor>,
     /// Every observed name: subject CN, issuer CN and SANs.
     pub names: Vec<String>,
+    pub issuer_cn: Option<String>,
 }
 
 /// A vendor-specific HTTP response header observed on a live request.
@@ -238,21 +245,27 @@ pub struct AsnEvidence {
     pub vendor: Option<Vendor>,
 }
 
-/// Who owns the infrastructure the endpoint runs on, per the scoring
-/// rules: the organization itself, an identifiable third party, or
-/// unknown when the evidence is absent, weak or contested.
+/// Who owns the infrastructure the endpoint runs on: the organization
+/// itself, an identifiable third party, contested, or unknown when the
+/// evidence is absent or weak.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfraOwner {
     Organization,
+    PossiblyOrganization,
     ThirdParty,
+    PossiblyThirdParty,
+    Ambiguous,
     Unknown,
 }
 
 impl InfraOwner {
     pub const fn as_str(&self) -> &'static str {
         match self {
-            InfraOwner::Organization => "organization",
+            InfraOwner::Organization => "organization-managed",
+            InfraOwner::PossiblyOrganization => "possibly-organization-managed",
             InfraOwner::ThirdParty => "third-party",
+            InfraOwner::PossiblyThirdParty => "possibly-third-party",
+            InfraOwner::Ambiguous => "ambiguous",
             InfraOwner::Unknown => "unknown",
         }
     }
@@ -261,9 +274,10 @@ impl InfraOwner {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Infrastructure {
     pub owner: InfraOwner,
+    pub operator: Option<String>,
     pub provider: Option<String>,
-    pub org_score: u32,
-    pub third_party_score: u32,
+    pub target_matches: u32,
+    pub other_matches: u32,
     pub confidence: Confidence,
 }
 
@@ -330,139 +344,190 @@ pub struct Evidence {
     pub asn: Option<AsnEvidence>,
 }
 
-/// Infrastructure ownership per the scoring rules. Provider identity
-/// never implies provider role: this answers only "whose infrastructure
-/// is this?".
-///
-/// Weights (organization | third party):
-///   final CNAME in org zone +1 | in a third-party zone +2
-///   PTR in org zone +1         | in a third-party zone +1
-///   RDAP netname names the org +3 | identified third party +3
-///   AS name names the org +4   | identified third party +4
-///   resolved IP in org ranges +4  | in provider ranges +4
-///
-/// A side scores only from 4 upward and must strictly beat the other;
-/// anything weaker or tied stays unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Classification {
+    Target,
+    Other,
+    Unknown,
+}
+
+/// Who owns the infrastructure the endpoint runs on.
 pub fn attribute_infrastructure(evidence: &Evidence, domain: &str) -> Infrastructure {
     let zone = registrable_zone(domain);
-    let in_own_zone = |name: &str| zone.as_deref().is_some_and(|z| in_zone(name, z));
-    let names_org = |text: &str| zone.as_deref().is_some_and(|z| names_operator(text, z));
+    let target = zone
+        .as_deref()
+        .and_then(|zone| zone.split('.').next())
+        .and_then(normalize);
 
-    let mut org_score: u32 = 0;
-    let mut third_party_score: u32 = 0;
-    let mut provider: Option<String> = None;
+    let in_target_zone = |name: &str| match (zone.as_deref(), registrable_zone(name)) {
+        (Some(zone), Some(name_zone)) if name_zone == zone => Classification::Target,
+        (Some(_), Some(_)) => Classification::Other,
+        _ => Classification::Unknown,
+    };
+    let names_target = |identity: &Option<Identity>| {
+        matches!(
+            (identity, &target),
+            (Some(identity), Some(target)) if matches_identity(identity, target)
+        )
+    };
 
-    if let Some(cname) = &evidence.cname
-        && let Some(hop) = cname.chain.last()
-    {
-        if in_own_zone(hop) {
-            org_score += 1;
+    let names_signal_class = |text: &str, vendor: Option<Vendor>| {
+        let identity = normalize(text);
+        if names_target(&identity) {
+            Classification::Target
+        } else if vendor.is_some() || identity.is_some() {
+            Classification::Other
         } else {
-            third_party_score += 2;
+            Classification::Unknown
         }
-    }
+    };
 
-    if let Some(ptr) = &evidence.ptr {
-        if in_own_zone(&ptr.record) {
-            org_score += 1;
-        } else {
-            third_party_score += 1;
+    let asn_class = match &evidence.asn {
+        Some(asn) => names_signal_class(&asn.asn, asn.vendor),
+        None => Classification::Unknown,
+    };
+    let rdap_class = match &evidence.rdap {
+        Some(rdap) => names_signal_class(&rdap.netname, rdap.vendor),
+        None => Classification::Unknown,
+    };
+    let ptr_class = match &evidence.ptr {
+        Some(ptr) => match in_target_zone(&ptr.record) {
+            Classification::Unknown if ptr.vendor.is_some() => Classification::Other,
+            class => class,
+        },
+        None => Classification::Unknown,
+    };
+    let cname_class = match &evidence.cname {
+        Some(cname) => match cname.chain.last().map(|hop| in_target_zone(hop)) {
+            Some(Classification::Target) => Classification::Target,
+            Some(Classification::Other) => Classification::Other,
+            _ if cname.vendor.is_some() => Classification::Other,
+            _ => Classification::Unknown,
+        },
+        None => Classification::Unknown,
+    };
+    let cert_class = match &evidence.cert {
+        Some(cert) => {
+            let subject_is_target = target.is_some()
+                && cert
+                    .names
+                    .iter()
+                    .filter(|name| Some(name.as_str()) != cert.issuer_cn.as_deref())
+                    .any(|name| {
+                        in_target_zone(name) == Classification::Target
+                            || names_target(&normalize(name))
+                    });
+            if subject_is_target {
+                Classification::Target
+            } else if cert.vendor.is_some() {
+                Classification::Other
+            } else {
+                Classification::Unknown
+            }
         }
+        None => Classification::Unknown,
+    };
+
+    let classes = [
+        (asn_class, evidence.asn.as_ref().and_then(|a| a.vendor)),
+        (rdap_class, evidence.rdap.as_ref().and_then(|r| r.vendor)),
+        (ptr_class, evidence.ptr.as_ref().and_then(|p| p.vendor)),
+        (cname_class, evidence.cname.as_ref().and_then(|c| c.vendor)),
+        (cert_class, evidence.cert.as_ref().and_then(|c| c.vendor)),
+    ];
+    let target_matches = classes
+        .iter()
+        .filter(|(class, _)| *class == Classification::Target)
+        .count() as u32;
+    let mut other_matches = classes
+        .iter()
+        .filter(|(class, _)| *class == Classification::Other)
+        .count() as u32;
+    let vendor_others = classes
+        .iter()
+        .filter(|(class, vendor)| *class == Classification::Other && vendor.is_some())
+        .count() as u32;
+
+    let range_vendor = evidence.range.as_ref().map(|range| range.vendor);
+    if range_vendor.is_some() {
+        other_matches += 1;
     }
 
-    let identity = named_third_party(evidence, &names_org);
+    let cert_is_sole_target = target_matches == 1 && cert_class == Classification::Target;
 
-    if let Some(range) = &evidence.range {
-        third_party_score += 4;
-        provider = Some(range.vendor.as_str().to_string());
-    }
-
-    if let Some(asn) = &evidence.asn {
-        if names_org(&asn.asn) {
-            org_score += 4;
-        } else if let Some(vendor) = asn.vendor {
-            third_party_score += 4;
-            provider = Some(vendor.as_str().to_string());
-        } else if identity.is_some() {
-            third_party_score += 4;
-            provider = identity.clone();
-        }
-    }
-
-    if let Some(rdap) = &evidence.rdap {
-        if names_org(&rdap.netname) {
-            org_score += 3;
-        } else if let Some(vendor) = rdap.vendor {
-            third_party_score += 3;
-            provider = Some(vendor.as_str().to_string());
-        } else if identity.is_some() {
-            third_party_score += 3;
-            provider = identity;
-        }
-    }
-
-    let owner = if org_score >= 4 && org_score > third_party_score {
+    let owner = if target_matches >= 2 && other_matches == 0 {
         InfraOwner::Organization
-    } else if third_party_score >= 4 && third_party_score > org_score {
+    } else if target_matches == 1 && other_matches == 0 {
+        InfraOwner::PossiblyOrganization
+    } else if other_matches >= 2
+        && (target_matches == 0 || (cert_is_sole_target && vendor_others >= 2))
+    {
         InfraOwner::ThirdParty
+    } else if other_matches == 1 && target_matches == 0 {
+        InfraOwner::PossiblyThirdParty
+    } else if target_matches > 0 && other_matches > 0 {
+        InfraOwner::Ambiguous
     } else {
         InfraOwner::Unknown
     };
+    let winning_matches = match owner {
+        InfraOwner::Organization | InfraOwner::PossiblyOrganization => target_matches,
+        _ => other_matches,
+    };
     let confidence = match owner {
         InfraOwner::Unknown => Confidence::None,
-        _ if org_score.abs_diff(third_party_score) >= 4 => Confidence::Confirmed,
-        _ => Confidence::Probable,
+        InfraOwner::PossiblyOrganization | InfraOwner::PossiblyThirdParty => Confidence::Weak,
+        InfraOwner::Ambiguous => Confidence::Mixed,
+        _ if winning_matches >= 3 => Confidence::Confirmed,
+        _ => Confidence::Likely,
     };
+
+    let operator = (owner == InfraOwner::Organization)
+        .then(|| {
+            target
+                .as_ref()
+                .map(|identity| display_name(&identity.compact))
+        })
+        .flatten();
+    let provider = range_vendor
+        .or(evidence.asn.as_ref().and_then(|a| a.vendor))
+        .or(evidence.rdap.as_ref().and_then(|r| r.vendor))
+        .or(evidence.ptr.as_ref().and_then(|p| p.vendor))
+        .or(evidence.cname.as_ref().and_then(|c| c.vendor))
+        .or(evidence.cert.as_ref().and_then(|c| c.vendor))
+        .map(|vendor| vendor.as_str().to_string())
+        .or_else(|| agreed_provider(evidence, &target));
 
     Infrastructure {
         owner,
+        operator,
         provider,
-        org_score,
-        third_party_score,
+        target_matches,
+        other_matches,
         confidence,
     }
 }
 
-/// An AS name and an RDAP organization that agree on a shared
-/// alphabetic token identify the network operator — without any
-/// provider list. The identity must not be the scanned organization
-/// itself, and both names must exist.
-fn named_third_party(evidence: &Evidence, names_org: &impl Fn(&str) -> bool) -> Option<String> {
-    let asn = evidence.asn.as_ref()?;
-    let rdap = evidence.rdap.as_ref()?;
-    if names_org(&asn.asn) || names_org(&rdap.netname) {
+/// A non-vendor third party named when the AS name and the RDAP netname
+/// agree on the same non-target identity.
+fn agreed_provider(evidence: &Evidence, target: &Option<Identity>) -> Option<String> {
+    let asn = evidence.asn.as_ref().and_then(|a| normalize(&a.asn))?;
+    let rdap = evidence.rdap.as_ref().and_then(|r| normalize(&r.netname))?;
+    if target
+        .as_ref()
+        .is_some_and(|target| matches_identity(&asn, target) || matches_identity(&rdap, target))
+    {
         return None;
     }
-    if asn.vendor.is_some() || rdap.vendor.is_some() {
-        return None;
-    }
-    let asn_tokens = identity_tokens(&asn.asn);
-    identity_tokens(&rdap.netname)
-        .into_iter()
-        .find(|token| asn_tokens.contains(token))
-        .map(|token| display_provider(&token))
-}
-
-fn identity_tokens(text: &str) -> Vec<String> {
-    text.to_uppercase()
-        .split(|c: char| !c.is_alphabetic())
-        .filter(|token| token.len() >= 3)
-        .map(String::from)
-        .collect()
-}
-
-fn display_provider(token: &str) -> String {
-    if token.len() <= 3 {
-        token.to_uppercase()
+    let shorter = if asn.compact.len() <= rdap.compact.len() {
+        &asn.compact
     } else {
-        let mut chars = token.chars();
-        match chars.next() {
-            Some(first) => {
-                first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
-            }
-            None => token.to_string(),
-        }
-    }
+        &rdap.compact
+    };
+    asn.tokens
+        .iter()
+        .any(|token| rdap.tokens.contains(token))
+        .then(|| display_name(shorter))
 }
 
 /// Whether the endpoint sits behind a provider-managed edge/CDN/WAF,
@@ -517,7 +582,7 @@ pub fn termination_role(evidence: &Evidence, domain: &str) -> Termination {
     };
     let confidence = match role {
         TerminationRole::Edge => Confidence::Confirmed,
-        TerminationRole::LikelyEdge => Confidence::Probable,
+        TerminationRole::LikelyEdge => Confidence::Likely,
         TerminationRole::Unproven => Confidence::None,
     };
     Termination {
@@ -554,25 +619,6 @@ pub(crate) fn registrable_zone(name: &str) -> Option<String> {
         2
     };
     (labels.len() >= take).then(|| labels[labels.len() - take..].join("."))
-}
-
-/// True when `name` equals `zone` or lies inside it.
-fn in_zone(name: &str, zone: &str) -> bool {
-    let name = name.trim_end_matches('.').to_lowercase();
-    name == zone || name.ends_with(&format!(".{zone}"))
-}
-
-/// True when a netname-style string ("PL-MBANKPL") contains the zone's
-/// registrable label ("mbank") as a whole token.
-fn names_operator(netname: &str, zone: &str) -> bool {
-    let Some(label) = zone.split('.').next() else {
-        return false;
-    };
-    let label = label.to_uppercase();
-    netname
-        .to_uppercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|token| token == label)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,21 +776,21 @@ pub fn verdict_of(infrastructure: &Infrastructure, termination: &Termination, pq
             }
         }
         TerminationRole::Unproven => match infrastructure.owner {
-            InfraOwner::Organization => {
+            InfraOwner::Organization | InfraOwner::PossiblyOrganization => {
                 if pq {
                     Verdict::PqOnOrgInfra
                 } else {
                     Verdict::NoPqOnOrgInfra
                 }
             }
-            InfraOwner::ThirdParty => {
+            InfraOwner::ThirdParty | InfraOwner::PossiblyThirdParty => {
                 if pq {
                     Verdict::PqOnThirdPartyInfra
                 } else {
                     Verdict::NoPqOnThirdPartyInfra
                 }
             }
-            InfraOwner::Unknown => {
+            InfraOwner::Ambiguous | InfraOwner::Unknown => {
                 if pq {
                     Verdict::PqUnattributed
                 } else {
@@ -764,6 +810,7 @@ pub fn fixture() -> DomainReport {
             vendor: None,
             name: "www.citi.com".to_string(),
             names: vec!["www.citi.com".to_string(), "citibankonline.pl".to_string()],
+            issuer_cn: Some("DigiCert TLS RSA SHA256 2020 CA1".to_string()),
         }),
         http: Some(HttpEvidence {
             header: "X-Akamai-Request-ID".to_string(),
@@ -803,7 +850,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn range_evidence_identifies_the_provider_and_counts_third_party() {
+    fn range_evidence_alone_leans_third_party_and_names_the_provider() {
         let evidence = Evidence {
             range: Some(RangeEvidence {
                 cidr: "104.16.0.0/12".to_string(),
@@ -812,10 +859,11 @@ mod tests {
             ..Default::default()
         };
         let infra = attribute_infrastructure(&evidence, "pqpulse.dev");
-        assert_eq!(infra.owner, InfraOwner::ThirdParty);
+        assert_eq!(infra.owner, InfraOwner::PossiblyThirdParty);
         assert_eq!(infra.provider.as_deref(), Some("Cloudflare"));
-        assert_eq!(infra.third_party_score, 4);
-        assert_eq!(infra.confidence, Confidence::Confirmed);
+        assert_eq!(infra.other_matches, 1);
+        assert_eq!(infra.target_matches, 0);
+        assert_eq!(infra.confidence, Confidence::Weak);
 
         let termination = termination_role(&evidence, "pqpulse.dev");
         assert_eq!(termination.role, TerminationRole::LikelyEdge);
@@ -827,7 +875,113 @@ mod tests {
     }
 
     #[test]
-    fn ovh_network_is_third_party_infrastructure_never_an_edge() {
+    fn a_vendor_range_and_a_vendor_asn_agree_on_third_party() {
+        let evidence = Evidence {
+            range: Some(RangeEvidence {
+                cidr: "104.16.0.0/12".to_string(),
+                vendor: Vendor::Cloudflare,
+            }),
+            asn: Some(AsnEvidence {
+                asn: "AS13335 CLOUDFLARENET".to_string(),
+                vendor: Some(Vendor::Cloudflare),
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "pqpulse.dev");
+        assert_eq!(infra.owner, InfraOwner::ThirdParty);
+        assert_eq!(infra.provider.as_deref(), Some("Cloudflare"));
+        assert_eq!(infra.other_matches, 2);
+        assert_eq!(infra.confidence, Confidence::Likely);
+    }
+
+    #[test]
+    fn mbank_names_are_recognized_as_the_organization() {
+        let evidence = Evidence {
+            asn: Some(AsnEvidence {
+                asn: "AS13274 MBANK-SA".to_string(),
+                vendor: None,
+            }),
+            rdap: Some(RdapEvidence {
+                netname: "PL-MBANKPL".to_string(),
+                vendor: None,
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "mbank.pl");
+        assert_eq!(infra.owner, InfraOwner::Organization);
+        assert_eq!(infra.operator.as_deref(), Some("Mbank"));
+        assert_eq!(infra.provider, None);
+        assert_eq!(infra.target_matches, 2);
+        assert_eq!(infra.other_matches, 0);
+        assert_eq!(infra.confidence, Confidence::Likely);
+    }
+
+    #[test]
+    fn a_foreign_ptr_contests_mbank_target_evidence() {
+        let evidence = Evidence {
+            asn: Some(AsnEvidence {
+                asn: "AS13274 MBANK-SA".to_string(),
+                vendor: None,
+            }),
+            rdap: Some(RdapEvidence {
+                netname: "PL-MBANKPL".to_string(),
+                vendor: None,
+            }),
+            ptr: Some(PtrEvidence {
+                record: "war01mail1.brebank.com.pl".to_string(),
+                vendor: None,
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "mbank.pl");
+        assert_eq!(infra.owner, InfraOwner::Ambiguous);
+        assert_eq!(infra.target_matches, 2);
+        assert_eq!(infra.other_matches, 1);
+        assert_eq!(infra.confidence, Confidence::Mixed);
+    }
+
+    #[test]
+    fn a_lone_foreign_ptr_leans_third_party() {
+        let evidence = Evidence {
+            ptr: Some(PtrEvidence {
+                record: "mail.mfinanse.sk".to_string(),
+                vendor: None,
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "mbank.pl");
+        assert_eq!(infra.owner, InfraOwner::PossiblyThirdParty);
+        assert_eq!(infra.provider, None);
+        assert_eq!(infra.confidence, Confidence::Weak);
+    }
+
+    #[test]
+    fn an_org_cert_on_vendor_evidence_resolves_third_party_not_ambiguous() {
+        let evidence = Evidence {
+            cert: Some(CertEvidence {
+                name: "mail.example.com".to_string(),
+                vendor: None,
+                names: vec!["mail.example.com".to_string()],
+                issuer_cn: Some("DigiCert Global CA".to_string()),
+            }),
+            asn: Some(AsnEvidence {
+                asn: "AS20940 AKAMAI-ASN1".to_string(),
+                vendor: Some(Vendor::Akamai),
+            }),
+            rdap: Some(RdapEvidence {
+                netname: "AKAMAI".to_string(),
+                vendor: Some(Vendor::Akamai),
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "example.com");
+        assert_eq!(infra.owner, InfraOwner::ThirdParty);
+        assert_eq!(infra.provider.as_deref(), Some("Akamai"));
+        assert_eq!(infra.confidence, Confidence::Likely);
+    }
+
+    #[test]
+    fn ovh_network_is_contested_evidence_never_an_edge() {
         let evidence = Evidence {
             ptr: Some(PtrEvidence {
                 record: "mail.krakowski.pinb.gov.pl".to_string(),
@@ -844,21 +998,22 @@ mod tests {
             ..Default::default()
         };
         let infra = attribute_infrastructure(&evidence, "mail.krakowski.pinb.gov.pl");
-        assert_eq!(infra.owner, InfraOwner::ThirdParty);
+        assert_eq!(infra.owner, InfraOwner::Ambiguous);
         assert_eq!(infra.provider.as_deref(), Some("OVH"));
-        assert_eq!(infra.org_score, 1);
-        assert_eq!(infra.third_party_score, 7);
+        assert_eq!(infra.target_matches, 1);
+        assert_eq!(infra.other_matches, 2);
+        assert_eq!(infra.confidence, Confidence::Mixed);
 
         let termination = termination_role(&evidence, "mail.krakowski.pinb.gov.pl");
         assert_eq!(termination.role, TerminationRole::Unproven);
         assert!(termination.edge_classes.is_empty());
         assert_eq!(
             verdict_of(&infra, &termination, false),
-            Verdict::NoPqOnThirdPartyInfra
+            Verdict::NoPqUnattributed
         );
         assert_eq!(
             verdict_of(&infra, &termination, true),
-            Verdict::PqOnThirdPartyInfra
+            Verdict::PqUnattributed
         );
     }
 
@@ -872,7 +1027,8 @@ mod tests {
             ..Default::default()
         };
         let infra = attribute_infrastructure(&evidence, "example.com");
-        assert_eq!(infra.owner, InfraOwner::ThirdParty);
+        assert_eq!(infra.owner, InfraOwner::PossiblyThirdParty);
+        assert_eq!(infra.confidence, Confidence::Weak);
         assert_eq!(infra.provider.as_deref(), Some("Google Cloud"));
 
         let termination = termination_role(&evidence, "example.com");
@@ -909,6 +1065,7 @@ mod tests {
                 name: "edge.example.com.akamaiedge.net".to_string(),
                 vendor: None,
                 names: vec!["edge.example.com.akamaiedge.net".to_string()],
+                issuer_cn: None,
             }),
             ..Default::default()
         };
@@ -932,7 +1089,7 @@ mod tests {
         let termination = termination_role(&evidence, "www.example.com");
         assert_eq!(termination.edge_classes, vec![EdgeSignal::Cname]);
         assert_eq!(termination.role, TerminationRole::LikelyEdge);
-        assert_eq!(termination.confidence, Confidence::Probable);
+        assert_eq!(termination.confidence, Confidence::Likely);
         let infra = attribute_infrastructure(&evidence, "www.example.com");
         assert_eq!(
             verdict_of(&infra, &termination, true),
@@ -941,7 +1098,33 @@ mod tests {
     }
 
     #[test]
-    fn org_zone_dns_and_netname_attribute_to_the_organization() {
+    fn own_zone_dns_and_netname_attribute_to_the_organization() {
+        let evidence = Evidence {
+            ptr: Some(PtrEvidence {
+                record: "www.allegro.pl".to_string(),
+                vendor: None,
+            }),
+            rdap: Some(RdapEvidence {
+                netname: "ALLEGRO-NET".to_string(),
+                vendor: None,
+            }),
+            asn: Some(AsnEvidence {
+                asn: "AS42656 ALLEGRO".to_string(),
+                vendor: None,
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "www.allegro.pl");
+        assert_eq!(infra.owner, InfraOwner::Organization);
+        assert_eq!(infra.operator.as_deref(), Some("Allegro"));
+        assert_eq!(infra.provider, None);
+        assert_eq!(infra.target_matches, 3);
+        assert_eq!(infra.other_matches, 0);
+        assert_eq!(infra.confidence, Confidence::Confirmed);
+    }
+
+    #[test]
+    fn a_foreign_as_name_contests_own_zone_target_evidence() {
         let evidence = Evidence {
             ptr: Some(PtrEvidence {
                 record: "www.allegro.pl".to_string(),
@@ -958,15 +1141,14 @@ mod tests {
             ..Default::default()
         };
         let infra = attribute_infrastructure(&evidence, "www.allegro.pl");
-        assert_eq!(infra.owner, InfraOwner::Organization);
-        assert_eq!(infra.provider, None);
-        assert_eq!(infra.org_score, 4);
-        assert_eq!(infra.third_party_score, 0);
-        assert_eq!(infra.confidence, Confidence::Confirmed);
+        assert_eq!(infra.owner, InfraOwner::Ambiguous);
+        assert_eq!(infra.target_matches, 2);
+        assert_eq!(infra.other_matches, 1);
+        assert_eq!(infra.confidence, Confidence::Mixed);
     }
 
     #[test]
-    fn a_lone_own_zone_ptr_is_too_weak_to_attribute() {
+    fn a_lone_own_zone_ptr_leans_organization() {
         let evidence = Evidence {
             ptr: Some(PtrEvidence {
                 record: "www.example.com".to_string(),
@@ -975,17 +1157,18 @@ mod tests {
             ..Default::default()
         };
         let infra = attribute_infrastructure(&evidence, "www.example.com");
-        assert_eq!(infra.owner, InfraOwner::Unknown);
-        assert_eq!(infra.confidence, Confidence::None);
+        assert_eq!(infra.owner, InfraOwner::PossiblyOrganization);
+        assert_eq!(infra.target_matches, 1);
+        assert_eq!(infra.confidence, Confidence::Weak);
         let termination = termination_role(&evidence, "www.example.com");
         assert_eq!(
             verdict_of(&infra, &termination, true),
-            Verdict::PqUnattributed
+            Verdict::PqOnOrgInfra
         );
     }
 
     #[test]
-    fn tied_scores_stay_unknown() {
+    fn a_foreign_ptr_against_a_matching_netname_is_ambiguous() {
         let evidence = Evidence {
             ptr: Some(PtrEvidence {
                 record: "host.fov.club".to_string(),
@@ -998,11 +1181,12 @@ mod tests {
             ..Default::default()
         };
         let infra = attribute_infrastructure(&evidence, "www.example.com");
-        assert_eq!(infra.owner, InfraOwner::Unknown);
+        assert_eq!(infra.owner, InfraOwner::Ambiguous);
+        assert_eq!(infra.confidence, Confidence::Mixed);
     }
 
     #[test]
-    fn cname_delegation_counts_double_for_third_parties() {
+    fn a_foreign_cname_leans_third_party_and_an_own_cname_leans_organization() {
         let evidence = Evidence {
             cname: Some(CnameEvidence {
                 chain: vec!["cdn.vendor.example.net".to_string()],
@@ -1011,7 +1195,9 @@ mod tests {
             ..Default::default()
         };
         let infra = attribute_infrastructure(&evidence, "www.example.com");
-        assert_eq!(infra.third_party_score, 2);
+        assert_eq!(infra.owner, InfraOwner::PossiblyThirdParty);
+        assert_eq!(infra.other_matches, 1);
+        assert_eq!(infra.confidence, Confidence::Weak);
 
         let own = Evidence {
             cname: Some(CnameEvidence {
@@ -1020,31 +1206,49 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(
-            attribute_infrastructure(&own, "www.example.com").org_score,
-            1
-        );
+        let own_infra = attribute_infrastructure(&own, "www.example.com");
+        assert_eq!(own_infra.owner, InfraOwner::PossiblyOrganization);
+        assert_eq!(own_infra.target_matches, 1);
+        assert_eq!(own_infra.confidence, Confidence::Weak);
     }
 
     #[test]
-    fn cert_names_never_attribute_ownership_but_edge_namespace_is_role_evidence() {
+    fn cert_subject_names_count_as_target_evidence() {
         let evidence = Evidence {
             cert: Some(CertEvidence {
                 name: "mail.example.com".to_string(),
                 vendor: None,
                 names: vec!["mail.example.com".to_string()],
+                issuer_cn: None,
             }),
             ..Default::default()
         };
-        assert_eq!(
-            attribute_infrastructure(&evidence, "mail.example.com").owner,
-            InfraOwner::Unknown
-        );
+        let infra = attribute_infrastructure(&evidence, "mail.example.com");
+        assert_eq!(infra.owner, InfraOwner::PossiblyOrganization);
+        assert_eq!(infra.target_matches, 1);
+        assert_eq!(infra.confidence, Confidence::Weak);
         assert!(
             termination_role(&evidence, "mail.example.com")
                 .edge_classes
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn cert_issuer_names_are_excluded_from_target_matching() {
+        let evidence = Evidence {
+            cert: Some(CertEvidence {
+                name: "www.othername.org".to_string(),
+                vendor: None,
+                names: vec!["www.othername.org".to_string(), "ACME-CA".to_string()],
+                issuer_cn: Some("ACME-CA".to_string()),
+            }),
+            ..Default::default()
+        };
+        let infra = attribute_infrastructure(&evidence, "www.acme.org");
+        assert_eq!(infra.owner, InfraOwner::Unknown);
+        assert_eq!(infra.target_matches, 0);
+        assert_eq!(infra.confidence, Confidence::None);
     }
 
     #[test]

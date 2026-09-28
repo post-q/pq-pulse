@@ -1,5 +1,5 @@
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::{self, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,6 +13,9 @@ use rustls::{
 use crate::model::{SymmetricAlg, TlsFacts, TlsSession};
 
 use super::DetectError;
+use super::limits::RateLimiter;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 // Like NoCertificateVerification, but stores the end-entity cert
 // for vendor name extraction.
@@ -160,8 +163,31 @@ pub(crate) fn upgrade(
     Ok(probe.outcome())
 }
 
-pub(crate) fn probe(host: &str) -> Result<(TlsSession, Option<Vec<u8>>), DetectError> {
-    let sock = TcpStream::connect((host, 443))?;
+fn connect_host(
+    host: &str,
+    port: u16,
+    limiter: Option<&RateLimiter>,
+) -> Result<TcpStream, DetectError> {
+    let mut last_err: Option<io::Error> = None;
+    for addr in (host, port).to_socket_addrs()? {
+        if let Some(limiter) = limiter {
+            limiter.acquire();
+        }
+        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            Ok(sock) => return Ok(sock),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(DetectError::Io(last_err.unwrap_or_else(|| {
+        io::Error::other(format!("no addresses for {host}"))
+    })))
+}
+
+pub(crate) fn probe(
+    host: &str,
+    limiter: Option<&RateLimiter>,
+) -> Result<(TlsSession, Option<Vec<u8>>), DetectError> {
+    let sock = connect_host(host, 443, limiter)?;
     let mut probe = TlsProbe::new(with_timeouts(sock)?, host)?;
     probe.complete_handshake()?;
 

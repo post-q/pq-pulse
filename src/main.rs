@@ -1,18 +1,24 @@
 mod detect;
 mod model;
+mod normalize;
 mod providers;
 mod render;
 
+use std::collections::VecDeque;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::process::exit;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use render::Format;
 
-use detect::check_domain;
+use detect::{ScanContext, check_domain};
+
+const DEFAULT_JOBS: usize = 4;
 
 #[derive(Debug)]
 enum Mode {
@@ -25,12 +31,14 @@ struct Cli {
     mode: Mode,
     format: Format,
     progress: bool,
+    jobs: usize,
 }
 
 fn parse_args(args: &[String]) -> Result<Cli, String> {
     let mut format: Option<Format> = None;
     let mut list = false;
     let mut progress = true;
+    let mut jobs: Option<usize> = None;
     let mut positional: Vec<String> = Vec::new();
 
     let mut iter = args.iter();
@@ -39,6 +47,18 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
             "--list" => list = true,
             "--json" => format = Some(Format::Json),
             "--no-progress" => progress = false,
+            "--jobs" => {
+                let Some(value) = iter.next() else {
+                    return Err("--jobs requires a positive number".to_string());
+                };
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("--jobs expects a positive number, got {value:?}"))?;
+                if parsed == 0 {
+                    return Err("--jobs expects a positive number".to_string());
+                }
+                jobs = Some(parsed);
+            }
             "--format" => {
                 let Some(value) = iter.next() else {
                     return Err("--format requires a value (text, json)".to_string());
@@ -55,6 +75,9 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
             _ => return Err("--list requires exactly <list-file> <output-file>".to_string()),
         }
     } else {
+        if jobs.is_some() {
+            return Err("--jobs is only valid together with --list".to_string());
+        }
         match positional.as_slice() {
             [host] => Mode::Single(host.clone()),
             _ => return Err("expected exactly one <domain>".to_string()),
@@ -66,6 +89,7 @@ fn parse_args(args: &[String]) -> Result<Cli, String> {
         mode,
         format: format.unwrap_or(default_format),
         progress,
+        jobs: jobs.unwrap_or(DEFAULT_JOBS),
     })
 }
 
@@ -84,7 +108,8 @@ fn clean_domain(line: &str) -> Option<String> {
 
 fn run_single(host: &str, format: Format) -> Result<(), Box<dyn std::error::Error>> {
     let renderer = format.renderer();
-    match check_domain(host) {
+    let context = ScanContext::unlimited();
+    match check_domain(host, &context) {
         Ok(report) => {
             println!("{}", renderer.document(&report));
             Ok(())
@@ -102,6 +127,7 @@ fn run_list(
     output_file: &str,
     format: Format,
     progress: bool,
+    jobs: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let renderer = format.renderer();
     let mut file = OpenOptions::new()
@@ -114,6 +140,8 @@ fn run_list(
         .map_err(|err| format!("could not read list file {list_file}: {err}"))?;
 
     let domains: Vec<String> = content.lines().filter_map(clean_domain).collect();
+
+    let context = Arc::new(ScanContext::polite());
 
     let pb = if progress {
         let pb =
@@ -130,23 +158,49 @@ fn run_list(
         None
     };
 
-    for domain in domains {
-        if let Some(pb) = &pb {
-            pb.set_message(domain.clone());
-        }
-        match check_domain(&domain) {
-            Ok(report) => {
-                writeln!(file, "{}", renderer.record(&report))?;
-            }
-            Err(err) => {
-                if let Some(pb) = &pb {
-                    pb.println(format!("{domain} -> ERROR: {err}"));
+    let pending: Mutex<VecDeque<(usize, String)>> =
+        Mutex::new(domains.iter().cloned().enumerate().collect());
+    let results: Mutex<Vec<Option<Result<crate::model::DomainReport, String>>>> =
+        Mutex::new((0..domains.len()).map(|_| None).collect());
+
+    let workers = jobs.min(domains.len().max(1));
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            let pending = &pending;
+            let results = &results;
+            let context = &context;
+            let pb = pb.as_ref();
+            scope.spawn(move || {
+                loop {
+                    let Some((index, domain)) = pending.lock().unwrap().pop_front() else {
+                        break;
+                    };
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        check_domain(&domain, context)
+                    }))
+                    .map_err(|_| "internal probe failure".to_string())
+                    .and_then(|report| report.map_err(|err| err.to_string()));
+                    if let (Some(pb), Err(err)) = (pb, &outcome) {
+                        pb.println(format!("{domain} -> ERROR: {err}"));
+                    }
+                    results.lock().unwrap()[index] = Some(outcome);
+                    if let Some(pb) = pb {
+                        pb.inc(1);
+                    }
                 }
-                writeln!(file, "{}", renderer.error_record(&domain, &err.to_string()))?;
-            }
+            });
         }
-        if let Some(pb) = &pb {
-            pb.inc(1);
+    });
+
+    for (domain, result) in domains.iter().zip(results.into_inner().unwrap()) {
+        match result {
+            Some(Ok(report)) => writeln!(file, "{}", renderer.record(&report))?,
+            Some(Err(err)) => writeln!(file, "{}", renderer.error_record(domain, &err))?,
+            None => writeln!(
+                file,
+                "{}",
+                renderer.error_record(domain, "internal probe failure")
+            )?,
         }
     }
 
@@ -160,7 +214,7 @@ fn run_list(
 fn usage() -> ! {
     eprintln!("usage: pq-pulse [--format text|json] <domain>");
     eprintln!(
-        "       pq-pulse --list <list-file> <output-file> [--format text|json] [--no-progress]"
+        "       pq-pulse --list <list-file> <output-file> [--jobs N] [--format text|json] [--no-progress]"
     );
     eprintln!("       (--json is shorthand for --format json)");
     exit(2)
@@ -182,7 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.mode {
         Mode::Single(host) => run_single(&host, cli.format),
         Mode::List(list_file, output_file) => {
-            run_list(&list_file, &output_file, cli.format, cli.progress)
+            run_list(&list_file, &output_file, cli.format, cli.progress, cli.jobs)
         }
     }
 }
@@ -233,6 +287,10 @@ mod tests {
         let cli = single(&["--list", "in.txt", "out.jsonl"]).unwrap();
         assert_eq!(cli.format, Format::Json);
         assert!(cli.progress);
+        assert_eq!(cli.jobs, DEFAULT_JOBS);
+
+        let cli = single(&["--list", "in.txt", "out.jsonl", "--jobs", "8"]).unwrap();
+        assert_eq!(cli.jobs, 8);
 
         let cli = single(&["--list", "in.txt", "out.jsonl", "--no-progress"]).unwrap();
         assert!(!cli.progress);
@@ -244,5 +302,9 @@ mod tests {
         assert!(single(&["--format", "yaml", "example.com"]).is_err());
         assert!(single(&[]).is_err());
         assert!(single(&["--list", "only-one-arg"]).is_err());
+        assert!(single(&["--jobs", "8", "example.com"]).is_err());
+        assert!(single(&["--list", "in.txt", "out.jsonl", "--jobs", "0"]).is_err());
+        assert!(single(&["--list", "in.txt", "out.jsonl", "--jobs", "many"]).is_err());
+        assert!(single(&["--list", "in.txt", "out.jsonl", "--jobs"]).is_err());
     }
 }

@@ -28,9 +28,10 @@ struct TlsDto<'a> {
 #[derive(Serialize)]
 struct InfrastructureDto {
     owner: &'static str,
+    operator: Option<String>,
     provider: Option<String>,
-    org_score: u32,
-    third_party_score: u32,
+    target_matches: u32,
+    other_matches: u32,
     confidence: &'static str,
 }
 
@@ -115,9 +116,10 @@ impl JsonRenderer {
     fn infrastructure_dto(infrastructure: &Infrastructure) -> InfrastructureDto {
         InfrastructureDto {
             owner: infrastructure.owner.as_str(),
+            operator: infrastructure.operator.clone(),
             provider: infrastructure.provider.clone(),
-            org_score: infrastructure.org_score,
-            third_party_score: infrastructure.third_party_score,
+            target_matches: infrastructure.target_matches,
+            other_matches: infrastructure.other_matches,
             confidence: infrastructure.confidence.as_str(),
         }
     }
@@ -328,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn json_stays_unknown_when_attribution_is_contested() {
+    fn json_marks_ambiguous_when_attribution_is_contested() {
         let report = crate::model::DomainReport::build(
             "www.allegro.pl".to_string(),
             None,
@@ -359,10 +361,10 @@ mod tests {
         );
         let value: Value = serde_json::from_str(&JsonRenderer.document(&report)).unwrap();
         let infrastructure = &value["infrastructure"];
-        assert_eq!(infrastructure["owner"], "unknown");
-        assert_eq!(infrastructure["org_score"], 4);
-        assert_eq!(infrastructure["third_party_score"], 4);
-        assert_eq!(infrastructure["confidence"], "none");
+        assert_eq!(infrastructure["owner"], "ambiguous");
+        assert_eq!(infrastructure["target_matches"], 2);
+        assert_eq!(infrastructure["other_matches"], 1);
+        assert_eq!(infrastructure["confidence"], "mixed");
         assert_eq!(value["verdict"], "classical_unattributed");
     }
 
@@ -387,17 +389,14 @@ mod tests {
                     name: "edge.business.allegro.pl".to_string(),
                     vendor: None,
                     names: vec!["edge.business.allegro.pl".to_string()],
-                }),
-                ptr: Some(crate::model::PtrEvidence {
-                    record: "upload.allegro.com.cz".to_string(),
-                    vendor: None,
+                    issuer_cn: None,
                 }),
                 rdap: Some(crate::model::RdapEvidence {
                     netname: "ALLEGRO-NET".to_string(),
                     vendor: None,
                 }),
                 asn: Some(crate::model::AsnEvidence {
-                    asn: "AS42656 QXL-POLAND".to_string(),
+                    asn: "AS42656 ALLEGRO".to_string(),
                     vendor: None,
                 }),
                 ..Default::default()
@@ -407,11 +406,12 @@ mod tests {
         );
         let value: Value = serde_json::from_str(&JsonRenderer.document(&report)).unwrap();
         let infrastructure = &value["infrastructure"];
-        assert_eq!(infrastructure["owner"], "organization");
+        assert_eq!(infrastructure["owner"], "organization-managed");
+        assert_eq!(infrastructure["operator"], "Allegro");
         assert!(infrastructure["provider"].is_null());
-        assert_eq!(infrastructure["org_score"], 4);
-        assert_eq!(infrastructure["third_party_score"], 1);
-        assert_eq!(infrastructure["confidence"], "probable");
+        assert_eq!(infrastructure["target_matches"], 4);
+        assert_eq!(infrastructure["other_matches"], 0);
+        assert_eq!(infrastructure["confidence"], "confirmed");
         assert_eq!(value["verdict"], "classical_on_org_infra");
     }
 
@@ -438,9 +438,10 @@ mod tests {
             ip: Some("192.0.2.1".parse().unwrap()),
             infrastructure: crate::model::Infrastructure {
                 owner: crate::model::InfraOwner::Unknown,
+                operator: None,
                 provider: None,
-                org_score: 0,
-                third_party_score: 0,
+                target_matches: 0,
+                other_matches: 0,
                 confidence: crate::model::Confidence::None,
             },
             ports: ports
@@ -452,6 +453,7 @@ mod tests {
                     name: host.to_string(),
                     vendor: None,
                     names: vec![host.to_string()],
+                    issuer_cn: None,
                 }),
                 ..Default::default()
             },

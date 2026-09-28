@@ -2,6 +2,7 @@ mod asn;
 mod cert;
 mod dns;
 mod http;
+mod limits;
 mod mail;
 mod ranges;
 mod rdap;
@@ -17,10 +18,35 @@ use crate::model::{CnameEvidence, DomainReport, Evidence, PtrEvidence, RangeEvid
 use asn::asn_lookup;
 use dns::{dig_cname_chain, dig_ptr, resolve};
 use http::probe_http;
+use limits::{HostLocks, Limits, RateLimiter};
 use mail::probe_mail_with_ranges;
-use ranges::{get_vendor_ranges, ip_in_ranges};
+use ranges::{VendorRanges, get_vendor_ranges, ip_in_ranges};
 use rdap::rdap_lookup;
 use tls::probe;
+
+pub(crate) struct ScanContext {
+    pub(crate) ranges: VendorRanges,
+    pub(crate) limits: Option<Limits>,
+}
+
+impl ScanContext {
+    pub(crate) fn unlimited() -> Self {
+        Self {
+            ranges: get_vendor_ranges(),
+            limits: None,
+        }
+    }
+
+    pub(crate) fn polite() -> Self {
+        Self {
+            ranges: get_vendor_ranges(),
+            limits: Some(Limits {
+                limiter: RateLimiter::new(),
+                host_locks: HostLocks::new(),
+            }),
+        }
+    }
+}
 
 /// Detection failures; `Display` forwards the upstream message unchanged.
 #[derive(Debug, Error)]
@@ -33,7 +59,7 @@ pub(crate) enum DetectError {
     Io(#[from] std::io::Error),
 }
 
-pub(crate) fn check_domain(host: &str) -> Result<DomainReport, DetectError> {
+pub(crate) fn check_domain(host: &str, context: &ScanContext) -> Result<DomainReport, DetectError> {
     let resolved_ip = resolve(host);
 
     let cname_chain = dig_cname_chain(host);
@@ -42,16 +68,18 @@ pub(crate) fn check_domain(host: &str) -> Result<DomainReport, DetectError> {
         chain: cname_chain,
     });
 
-    let vendor_ranges = get_vendor_ranges();
     let range = resolved_ip
         .as_ref()
-        .and_then(|ip| ip_in_ranges(ip, &vendor_ranges))
+        .and_then(|ip| ip_in_ranges(ip, &context.ranges))
         .map(|(vendor, cidr)| RangeEvidence { cidr, vendor });
 
-    let (tls, cert, http, email, ptr, rdap, asn) = std::thread::scope(|scope| {
-        let mail = scope.spawn(|| probe_mail_with_ranges(host, &vendor_ranges));
+    let limiter = context.limits.as_ref().map(|limits| &limits.limiter);
 
-        let (tls, cert_der) = match probe(host) {
+    let (tls, cert, http, email, ptr, rdap, asn) = std::thread::scope(|scope| {
+        let mail =
+            scope.spawn(|| probe_mail_with_ranges(host, &context.ranges, context.limits.as_ref()));
+
+        let (tls, cert_der) = match probe(host, limiter) {
             Ok((facts, cert)) => (TlsState::Tls(facts), cert),
             Err(_) => (TlsState::Unavailable, None),
         };
