@@ -80,51 +80,65 @@ tolerated.
 Text output (single domain):
 
 ```
-gorlice.pinb.gov.pl
-checked: 2026-09-23 19:30 +02:00
+nbp.pl
+checked: 2026-09-28 14:40 +02:00
 
 WEB
   endpoint
-    443/tcp      unreachable
+    443/tcp      reachable
+    TLS          TLS 1.3
+    KX           X25519MLKEM768
+    symmetric    AES-128
+    PQ           yes
+
+  termination
+    provider     Imperva
 
   network
-    IP           -
+    IP           45.223.164.250
     PTR          -
-    ASN          -
-    RDAP         -
+    ASN          AS19551 INCAPSULA
+    RDAP         THALES-IMPERVA-NA4-AGG-45-223
 
 
 MAIL
-  MX 1  mail.gorlice.pinb.gov.pl
+  MX 10  mx1r.nbp.pl
 
     25/tcp       unreachable
-    587/tcp      reachable
-      STARTTLS   yes
-      TLS        TLS 1.3
-      KX         X25519
-      symmetric  AES-256
-      PQ         no
-
-    465/tcp      reachable
-      TLS        TLS 1.3
-      KX         X25519
-      symmetric  AES-256
-      PQ         no
+    587/tcp      unreachable
+    465/tcp      unreachable
 
     network
-      IP         51.38.155.53
-      PTR        mail.gorlice.pinb.gov.pl
-      ASN        AS16276 OVH
-      RDAP       OVH-DEDICATED-FO
+      IP         195.85.196.53
+      PTR        mx1r.nbp.pl
+      ASN        AS21328 NBP-AS
+      RDAP       NBPNET
     attribution
       infrastructure  ambiguous
-      operator     -
-      provider   OVH
+      operator   -
+      provider   -
+      confidence  mixed
+
+  MX 10  mx1c.nbp.pl
+
+    25/tcp       unreachable
+    587/tcp      unreachable
+    465/tcp      unreachable
+
+    network
+      IP         193.109.212.53
+      PTR        mx1c.nbp.pl
+      ASN        AS21328 NBP-AS
+      RDAP       NBPNET
+    attribution
+      infrastructure  ambiguous
+      operator   -
+      provider   -
       confidence  mixed
 
 
 SUMMARY
-  web            web TLS unreachable
+  web            PQ TLS at Imperva edge
   mail           MX discovered; SMTP/25 unreachable from probe
 ```
 
