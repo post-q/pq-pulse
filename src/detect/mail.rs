@@ -7,6 +7,7 @@ use std::time::Duration;
 use super::asn::asn_lookup;
 use super::cert::parse_cert_evidence;
 use super::dns::{dig_mx, dig_ptr, resolve_all};
+use super::limits::{Limits, RateLimiter, jitter_sleep};
 use super::ranges::{VendorRanges, ip_in_ranges};
 use super::rdap::rdap_lookup;
 use super::tls;
@@ -25,14 +26,17 @@ const EHLO_NAME: &str = "pq-pulse";
 pub(crate) fn probe_mail_with_ranges(
     domain: &str,
     vendor_ranges: &VendorRanges,
+    limits: Option<&Limits>,
 ) -> Option<EmailReport> {
-    mail_report_with(dig_mx(domain), resolve_all, vendor_ranges)
+    mail_report_with(domain, dig_mx(domain), resolve_all, vendor_ranges, limits)
 }
 
 fn mail_report_with(
+    domain: &str,
     records: Vec<MxRecord>,
     resolve: impl Fn(&str) -> Vec<IpAddr> + Sync,
     vendor_ranges: &VendorRanges,
+    limits: Option<&Limits>,
 ) -> Option<EmailReport> {
     if records.is_empty() {
         return None;
@@ -40,7 +44,7 @@ fn mail_report_with(
     let mx = thread::scope(|scope| {
         let handles: Vec<_> = records
             .iter()
-            .map(|record| scope.spawn(|| probe_mx(record, vendor_ranges, &resolve)))
+            .map(|record| scope.spawn(|| probe_mx(domain, record, vendor_ranges, &resolve, limits)))
             .collect();
         handles
             .into_iter()
@@ -51,31 +55,50 @@ fn mail_report_with(
 }
 
 fn probe_mx(
+    domain: &str,
     record: &MxRecord,
     vendor_ranges: &VendorRanges,
     resolve: &(impl Fn(&str) -> Vec<IpAddr> + Sync),
+    limits: Option<&Limits>,
 ) -> MxProbe {
     let addresses = resolve(&record.host);
-    let outcomes: Vec<ProbeOutcome> = thread::scope(|scope| {
-        let handles: Vec<_> = Port::ALL
-            .iter()
-            .map(|port| {
-                let host = record.host.as_str();
-                let addrs: &[IpAddr] = &addresses;
-                scope.spawn(move || probe_port(*port, host, addrs))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle.join().unwrap_or(ProbeOutcome {
-                    state: SmtpState::Unreachable,
-                    peer: None,
-                    cert: None,
+    let outcomes = match limits {
+        Some(limits) => limits.host_locks.with_host(&record.host, || {
+            let mut outcomes = Vec::new();
+            for (attempt, port) in Port::ALL.iter().enumerate() {
+                if attempt > 0 {
+                    jitter_sleep();
+                }
+                outcomes.push(probe_port(
+                    *port,
+                    record.host.as_str(),
+                    &addresses,
+                    Some(&limits.limiter),
+                ));
+            }
+            outcomes
+        }),
+        None => thread::scope(|scope| {
+            let handles: Vec<_> = Port::ALL
+                .iter()
+                .map(|port| {
+                    let host = record.host.as_str();
+                    let addrs: &[IpAddr] = &addresses;
+                    scope.spawn(move || probe_port(*port, host, addrs, None))
                 })
-            })
-            .collect()
-    });
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or(ProbeOutcome {
+                        state: SmtpState::Unreachable,
+                        peer: None,
+                        cert: None,
+                    })
+                })
+                .collect()
+        }),
+    };
 
     let attribution_ip = outcomes
         .iter()
@@ -110,7 +133,7 @@ fn probe_mx(
         asn,
         ..Default::default()
     };
-    let infrastructure = attribute_infrastructure(&evidence, &record.host);
+    let infrastructure = attribute_infrastructure(&evidence, domain);
 
     MxProbe {
         priority: record.priority,
@@ -136,15 +159,25 @@ struct ProbeOutcome {
     cert: Option<Vec<u8>>,
 }
 
-fn probe_port(port: Port, host: &str, addresses: &[IpAddr]) -> ProbeOutcome {
+fn probe_port(
+    port: Port,
+    host: &str,
+    addresses: &[IpAddr],
+    limiter: Option<&RateLimiter>,
+) -> ProbeOutcome {
     match port {
-        Port::Smtps465 => smtps_probe(host, addresses),
-        _ => smtp_probe(host, addresses, port.number()),
+        Port::Smtps465 => smtps_probe(host, addresses, limiter),
+        _ => smtp_probe(host, addresses, port.number(), limiter),
     }
 }
 
-fn smtp_probe(host: &str, addresses: &[IpAddr], port: u16) -> ProbeOutcome {
-    let Some((mut conn, peer)) = connect_any(addresses, port) else {
+fn smtp_probe(
+    host: &str,
+    addresses: &[IpAddr],
+    port: u16,
+    limiter: Option<&RateLimiter>,
+) -> ProbeOutcome {
+    let Some((mut conn, peer)) = connect_any(addresses, port, limiter) else {
         return ProbeOutcome {
             state: SmtpState::Unreachable,
             peer: None,
@@ -225,7 +258,23 @@ fn smtp_probe(host: &str, addresses: &[IpAddr], port: u16) -> ProbeOutcome {
     }
 }
 
-fn connect_any(addresses: &[IpAddr], port: u16) -> Option<(SmtpConn, IpAddr)> {
+fn connect_any(
+    addresses: &[IpAddr],
+    port: u16,
+    limiter: Option<&RateLimiter>,
+) -> Option<(SmtpConn, IpAddr)> {
+    if let Some(limiter) = limiter {
+        for ip in addresses {
+            limiter.acquire();
+            if let Ok(stream) =
+                TcpStream::connect_timeout(&SocketAddr::new(*ip, port), CONNECT_TIMEOUT)
+            {
+                return Some((SmtpConn::new(stream), *ip));
+            }
+        }
+        return None;
+    }
+
     let (sender, receiver) = mpsc::channel();
     let mut handles = Vec::new();
     for ip in addresses.iter().copied() {
@@ -256,8 +305,8 @@ fn connect_any(addresses: &[IpAddr], port: u16) -> Option<(SmtpConn, IpAddr)> {
     None
 }
 
-fn smtps_probe(host: &str, addresses: &[IpAddr]) -> ProbeOutcome {
-    let Some((conn, peer)) = connect_any(addresses, Port::Smtps465.number()) else {
+fn smtps_probe(host: &str, addresses: &[IpAddr], limiter: Option<&RateLimiter>) -> ProbeOutcome {
+    let Some((conn, peer)) = connect_any(addresses, Port::Smtps465.number(), limiter) else {
         return ProbeOutcome {
             state: SmtpState::Unreachable,
             peer: None,
@@ -462,14 +511,23 @@ mod tests {
     #[test]
     fn no_mx_records_mean_no_probes_and_no_report() {
         let ranges = VendorRanges::new();
-        assert!(mail_report_with(Vec::new(), |_host| vec![], &ranges).is_none());
+        assert!(
+            mail_report_with("example.com", Vec::new(), |_host| vec![], &ranges, None).is_none()
+        );
     }
 
     #[test]
     fn multiple_mx_records_are_all_reported_independently() {
         let records = parse_mx_lines("20 mx2.example.com\n10 mx1.example.com\n");
         assert_eq!(records.len(), 2);
-        let report = mail_report_with(records, |_host| vec![], &VendorRanges::new()).unwrap();
+        let report = mail_report_with(
+            "example.com",
+            records,
+            |_host| vec![],
+            &VendorRanges::new(),
+            None,
+        )
+        .unwrap();
         assert_eq!(report.mx.len(), 2);
         assert_eq!(report.mx[0].priority, 10);
         assert_eq!(report.mx[0].host, "mx1.example.com");
@@ -487,7 +545,14 @@ mod tests {
     #[test]
     fn ports_are_probed_in_a_fixed_order() {
         let records = parse_mx_lines("10 mx.example.com\n");
-        let report = mail_report_with(records, |_host| vec![], &VendorRanges::new()).unwrap();
+        let report = mail_report_with(
+            "example.com",
+            records,
+            |_host| vec![],
+            &VendorRanges::new(),
+            None,
+        )
+        .unwrap();
         let ports: Vec<Port> = report.mx[0].ports.iter().map(|p| p.port).collect();
         assert_eq!(
             ports,

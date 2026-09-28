@@ -1,8 +1,12 @@
 # pq-pulse
 
-Checks whether a domain's TLS key exchange is post-quantum, and attributes the
-TLS endpoint (CDN/WAF edge, cloud, or own infrastructure) from 7 evidence
-slots across 5 evidence classes.
+Checks whether a domain's TLS key exchange is post-quantum. It probes:
+- for the public web endpoint (443)
+- for its mail transport (every MX record on TCP/25, 587 and 465)
+
+and attributes the underlying infrastructure (organization,
+third-party provider, or unknown) plus, independently, whether the TLS
+endpoint is a provider edge/CDN/WAF.
 
 ## Usage
 
@@ -11,6 +15,7 @@ $ pq-pulse <domain>                      # text report to stdout
 $ pq-pulse <domain> --json               # JSON
 $ pq-pulse --list <list-file> <out-file> # batch, one JSON record per line
 $ pq-pulse --list <list-file> <out-file> --format text --no-progress
+$ pq-pulse --list <list-file> <out-file> --jobs 8
 ```
 
 `--json` is shorthand for `--format json`. Batch defaults to JSON records;
@@ -21,64 +26,111 @@ tolerated.
 
 ## What it reports
 
-- `kx_group` — `X25519MLKEM768` means the key exchange is post-quantum
-- `symmetric_alg` — AES128 / AES256 / CHACHA20-POLY1305
-- 7 evidence slots — CNAME delegation, published IP ranges, certificate
-  names, PTR, RDAP network registration, ASN and HTTP. `value` is the raw observation;
-  evidence becomes a signal when it is deterministically attributed to
-  either the scanned organization itself (own-zone CNAME/PTR, RDAP/ASN
-  echoing the registrable label → `self (zone)`) or a known vendor
-  (Cloudflare, Akamai, Imperva, Fastly, CloudFront, Myra, Link11,
-  Google Cloud, Azure). Unresolved evidence is neutral and never counts
-- `signals` — TLS-endpoint attribution: `self`, a known provider, or
-  `unresolved`. Evidence classes: CNAME (DNS delegation), HTTP (actual edge
-  processing), CERT, RANGE, and PTR+RDAP+ASN as one network-ownership class,
-  so agreeing network evidence corroborates without inflating confidence.
-  Contested attribution is reported as `candidates`. Two agreeing evidence
-  classes = `confirmed`, one = `probable`
+- `TLS` / `KX` / `symmetric` / `PQ` — negotiated protocol version, key-exchange
+  group and symmetric suite. `X25519MLKEM768` is the post-quantum hybrid
+- 7 evidence slots — CNAME delegation chain, matched provider IP range,
+  certificate names (CN + SANs), HTTP edge headers, PTR, RDAP network
+  registration, origin ASN
+- `infrastructure` — who owns the network the endpoint sits on, from
+  independent signal classification against the scan target's identity
+  (derived once from the domain, e.g. `mbank.pl` → `mbank`): CNAME and PTR
+  zone membership, RDAP/AS identity match (normalized, with bounded
+  prefix/subset rules — no unrestricted substrings), certificate subject
+  names, vendor IP ranges. Signals are counted without weights:
+  ≥ 2 agreeing target signals (or ≥ 2 third-party signals) attribute
+  firmly, a lone signal leans (`possibly-*`), a mix of both sides is
+  `ambiguous`, nothing stays `unknown`. Confidence follows the count:
+  `none`, `weak`, `likely`, `confirmed`; contested evidence reports
+  `mixed`. The `provider` name is observed, not looked up from a list:
+  vendor aliases where known (Cloudflare, Akamai, Imperva, Fastly,
+  CloudFront, …), otherwise the identity agreed between the AS name and
+  the RDAP organization (e.g. `OVH` ↔ `OVH-DEDICATED-FO`)
+- `termination` — whether the TLS endpoint is a provider edge, independent of
+  who owns the network: provider identity alone is never role evidence
+  (an OVH ASN is hosting, an AWS ASN is not automatically edge). Edge
+  evidence: CNAME into a vendor edge namespace, IP in a documented edge
+  range, vendor HTTP edge headers, certificate names in an edge namespace,
+  an edge-vendor RDAP/AS name. Two independent classes → `edge`, one strong
+  class → `likely_edge`, otherwise `unproven`
+- `MAIL` — every published MX record (priority preserved), probed on TCP/25,
+  587 and 465 independently. 25/587 speak SMTP: banner, EHLO, STARTTLS
+  detection, in-place TLS upgrade; 465 is implicit TLS from the first byte.
+  `STARTTLS unavailable` is reported distinctly and is never a PQ verdict.
+  Domains without MX records are not probed
+- `SUMMARY` — one phrase for web, one rollup for mail. Mail delivery rides
+  on TCP/25 alone (`PQ enabled` → `classical TLS only` → `TLS failed` →
+  `no TLS` → `MX discovered; SMTP/25 unreachable from probe`); when 25 is
+  unreachable the summary keeps the attribution instead of collapsing to
+  `unreachable`
 
 | verdict | description |
 | --- | --- |
-| `pq_at_edge` | The public connection terminates at an identified edge/CDN/security provider, where post-quantum or hybrid key exchange is enabled. |
-| `pq_cloud_hosted` | The service is hosted on infrastructure attributed to a public cloud provider, with post-quantum or hybrid key exchange enabled. |
-| `pq_vendor_hosted` | The service is hosted on infrastructure attributed to a third-party provider, with post-quantum or hybrid key exchange enabled. |
-| `pq_own_infra` | The service appears to terminate on infrastructure operated by the organization, with post-quantum or hybrid key exchange enabled. |
-| `no_pq_edge` | The public connection terminates at an identified edge/CDN/security provider, but no post-quantum key exchange was observed. |
-| `no_pq_cloud_hosted` | The service is hosted on infrastructure attributed to a public cloud provider, but no post-quantum key exchange was observed. |
-| `no_pq_vendor_hosted` | The service is hosted on infrastructure attributed to a third-party provider, but no post-quantum key exchange was observed. |
-| `no_pq_own_infra` | The service appears to terminate on infrastructure operated by the organization, but no post-quantum key exchange was observed. |
+| `pq_at_edge` | PQ or hybrid key exchange with at least two independent edge/CDN/WAF indications. |
+| `pq_likely_at_edge` | PQ or hybrid key exchange with one strong edge indication. |
+| `pq_on_org_infra` | PQ or hybrid key exchange on infrastructure attributed to the organization itself. |
+| `pq_on_third_party_infra` | PQ or hybrid key exchange on infrastructure attributed to a third party. |
+| `pq_unattributed` | PQ or hybrid key exchange; infrastructure could not be attributed. |
+| `classical_at_edge` | No PQ key exchange, with at least two independent edge/CDN/WAF indications. |
+| `classical_likely_at_edge` | No PQ key exchange, with one strong edge indication. |
+| `classical_on_org_infra` | No PQ key exchange on infrastructure attributed to the organization itself. |
+| `classical_on_third_party_infra` | No PQ key exchange on infrastructure attributed to a third party. |
+| `classical_unattributed` | No PQ key exchange; infrastructure could not be attributed. |
+| `tls_unavailable` | The HTTPS endpoint was unreachable; PQ status unknown. |
 
 Text output (single domain):
 
 ```
-checked: 2026-09-25 17:31 +02:00
+gorlice.pinb.gov.pl
+checked: 2026-09-23 19:30 +02:00
 
 WEB
   endpoint
-    443/tcp      reachable
-    TLS          TLS 1.2
-    KX           X25519
-    symmetric    AES-256
-    PQ           no
-
-  termination
-    provider     Akamai
+    443/tcp      unreachable
 
   network
-    IP           104.94.222.171
-    PTR          a104-94-222-171.deploy.static.akamaitechnologies.com
-    ASN          AS33905 AKAMAI-AMS
-    RDAP         AKAMAI
+    IP           -
+    PTR          -
+    ASN          -
+    RDAP         -
 
 
 MAIL
-  no MX records
+  MX 1  mail.gorlice.pinb.gov.pl
+
+    25/tcp       unreachable
+    587/tcp      reachable
+      STARTTLS   yes
+      TLS        TLS 1.3
+      KX         X25519
+      symmetric  AES-256
+      PQ         no
+
+    465/tcp      reachable
+      TLS        TLS 1.3
+      KX         X25519
+      symmetric  AES-256
+      PQ         no
+
+    network
+      IP         51.38.155.53
+      PTR        mail.gorlice.pinb.gov.pl
+      ASN        AS16276 OVH
+      RDAP       OVH-DEDICATED-FO
+    attribution
+      infrastructure  ambiguous
+      operator     -
+      provider   OVH
+      confidence  mixed
 
 
 SUMMARY
-  web            classical TLS at Akamai edge
-  mail           no MX records
+  web            web TLS unreachable
+  mail           MX discovered; SMTP/25 unreachable from probe
 ```
+
+The `termination` block is printed only when its confidence is `confirmed`;
+otherwise the provider identity still appears in the SUMMARY phrase (e.g.
+`classical TLS on OVH infrastructure`).
 
 ## Installation
 
@@ -93,9 +145,10 @@ Or grab a prebuilt binary from [GitHub Releases](https://github.com/post-q/pq-pu
 
 ## Requirements
 
-- `dig` on PATH (CNAME/PTR/TXT lookups are shell-outs; origin ASN via
-  Team Cymru DNS)
-- network access; one HTTPS request per domain for HTTP evidence; vendor IP
+- `dig` on PATH (MX, A/AAAA, CNAME/PTR/TXT lookups are shell-outs; origin ASN
+  via Team Cymru DNS)
+- network access; one HTTPS request per domain for HTTP evidence, one SMTP
+  dialogue per reachable mail port, RDAP lookups per endpoint; provider IP
   ranges are fetched once and cached 24 h in `$TMPDIR/pq-edge-ranges.json`
 
 ## Build

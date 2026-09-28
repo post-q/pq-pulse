@@ -1,7 +1,7 @@
 use super::Renderer;
 use crate::model::{
-    Confidence, DomainReport, EmailReport, Infrastructure, MxProbe, PortProbe, SmtpState, TlsState,
-    Verdict,
+    Confidence, DomainReport, EmailReport, InfraOwner, Infrastructure, MxProbe, Port, PortProbe,
+    SmtpState, TlsState, Verdict,
 };
 
 pub struct TextRenderer;
@@ -203,6 +203,15 @@ fn mx_lines(probe: &MxProbe) -> Vec<String> {
     ));
     lines.push(row(
         6,
+        "operator",
+        &probe
+            .infrastructure
+            .operator
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
+    ));
+    lines.push(row(
+        6,
         "provider",
         &probe
             .infrastructure
@@ -286,39 +295,68 @@ fn mail_summary(email: Option<&EmailReport>) -> String {
     let Some(email) = email else {
         return "no MX records".to_string();
     };
+    if email.mx.is_empty() {
+        return "no MX records".to_string();
+    }
     let states: Vec<&SmtpState> = email
         .mx
         .iter()
-        .flat_map(|probe| probe.ports.iter().map(|port| &port.state))
+        .filter_map(|probe| {
+            probe
+                .ports
+                .iter()
+                .find(|port_probe| port_probe.port == Port::Smtp25)
+        })
+        .map(|port_probe| &port_probe.state)
         .collect();
-    if states.is_empty() {
-        return "no MX records".to_string();
-    }
-    if states
+    let unreachable = "MX discovered; SMTP/25 unreachable from probe";
+    let delivery = if states
         .iter()
         .any(|state| matches!(state, SmtpState::Tls(session) if session.is_pq()))
     {
-        return "PQ enabled".to_string();
-    }
-    if states
+        "PQ enabled".to_string()
+    } else if states
         .iter()
         .any(|state| matches!(state, SmtpState::Tls(_)))
     {
-        return "classical TLS only".to_string();
-    }
-    if states
+        "classical TLS only".to_string()
+    } else if states
         .iter()
         .any(|state| matches!(state, SmtpState::TlsFailed))
     {
-        return "TLS failed".to_string();
-    }
-    if states
+        "TLS failed".to_string()
+    } else if states
         .iter()
         .any(|state| matches!(state, SmtpState::NoStarttls))
     {
-        return "no TLS".to_string();
+        "no TLS".to_string()
+    } else {
+        unreachable.to_string()
+    };
+    if delivery != unreachable {
+        return delivery;
     }
-    "unreachable".to_string()
+    let attributed = |owner: InfraOwner| {
+        email
+            .mx
+            .iter()
+            .all(|probe| probe.infrastructure.owner == owner)
+    };
+    let providers: Vec<Option<&str>> = email
+        .mx
+        .iter()
+        .map(|probe| probe.infrastructure.provider.as_deref())
+        .collect();
+    if attributed(InfraOwner::Organization) {
+        format!("{delivery}; organization-attributed infrastructure")
+    } else if attributed(InfraOwner::ThirdParty)
+        && providers.iter().all(|provider| *provider == providers[0])
+        && providers[0].is_some()
+    {
+        format!("{delivery}; {} infrastructure", providers[0].unwrap())
+    } else {
+        delivery
+    }
 }
 
 #[cfg(test)]
@@ -402,9 +440,10 @@ mod tests {
             ip: Some("192.0.2.1".parse().unwrap()),
             infrastructure: crate::model::Infrastructure {
                 owner: crate::model::InfraOwner::Organization,
+                operator: None,
                 provider: None,
-                org_score: 4,
-                third_party_score: 0,
+                target_matches: 3,
+                other_matches: 0,
                 confidence: crate::model::Confidence::Confirmed,
             },
             ports: ports
@@ -416,6 +455,7 @@ mod tests {
                     name: host.to_string(),
                     vendor: None,
                     names: vec![host.to_string()],
+                    issuer_cn: None,
                 }),
                 ptr: Some(PtrEvidence {
                     record: format!("ptr.{host}"),
@@ -475,11 +515,12 @@ mod tests {
             "      ASN        AS64512 EXAMPLE-AS",
             "      RDAP       EXAMPLE-NET",
             "    attribution",
-            "      infrastructure  organization",
+            "      infrastructure  organization-managed",
+            "      operator   -",
             "      provider   -",
             "      confidence  confirmed",
             "SUMMARY",
-            "  mail           classical TLS only",
+            "  mail           MX discovered; SMTP/25 unreachable from probe; organization-attributed infrastructure",
         ];
         for line in expected {
             assert!(text.contains(line), "missing line: {line}");
@@ -516,7 +557,9 @@ mod tests {
         assert!(mail_section.contains("    465/tcp      reachable"));
         assert!(mail_section.contains("      TLS        failed"));
         assert!(!mail_section.contains("STARTTLS"));
-        assert!(text.contains("  mail           TLS failed"));
+        assert!(text.contains(
+            "  mail           MX discovered; SMTP/25 unreachable from probe; organization-attributed infrastructure"
+        ));
     }
 
     #[test]
@@ -547,7 +590,9 @@ mod tests {
             "mx1.example.pl",
         )]);
         let text = TextRenderer.document(&report);
-        assert!(text.contains("  mail           unreachable"));
+        assert!(text.contains(
+            "  mail           MX discovered; SMTP/25 unreachable from probe; organization-attributed infrastructure"
+        ));
     }
 
     #[test]

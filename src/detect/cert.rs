@@ -45,5 +45,6 @@ pub(crate) fn parse_cert_evidence(cert_der: &[u8]) -> Option<CertEvidence> {
         name,
         vendor,
         names,
+        issuer_cn: issuer_cn.map(String::from),
     })
 }
