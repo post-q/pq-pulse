@@ -1,11 +1,15 @@
 # Changelog
-## Unreleased
+## 0.5.1 - 2026-09-28
 
 ### Features
 - Add termination signal in favor of infra/edge signals
+- Provide clear verdict rules
+- Improve batch scanning
 
 ### Miscellaneous Tasks
 - Release pq-pulse version 0.5.0
+- Update README.md
+- Release pq-pulse version 0.5.1
 
 ## 0.4.0 - 2026-09-21
 
