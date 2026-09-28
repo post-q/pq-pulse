@@ -1,0 +1,6 @@
+# cargo-release configuration
+# https://github.com/crate-ci/cargo-release
+
+# Regenerate CHANGELOG.md via git-cliff before the release commit,
+# so the changelog update is included in the release commit and tag.
+pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
