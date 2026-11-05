@@ -11,6 +11,7 @@ endpoint is a provider edge/CDN/WAF.
 ## Usage
 
 ```console
+$ pq-pulse --help                        # all options
 $ pq-pulse <domain>                      # text report to stdout
 $ pq-pulse <domain> --json               # JSON
 $ pq-pulse --list <list-file> <out-file> # batch, one JSON record per line

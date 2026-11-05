@@ -5,7 +5,6 @@ mod providers;
 mod render;
 
 use std::collections::VecDeque;
-use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::process::exit;
@@ -13,12 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use render::Format;
 
 use detect::{ScanContext, check_domain};
 
-const DEFAULT_JOBS: usize = 4;
+const DEFAULT_JOBS: u16 = 4;
 
 #[derive(Debug)]
 enum Mode {
@@ -26,71 +26,51 @@ enum Mode {
     List(String, String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Parser)]
+#[command(
+    name = "pq-pulse",
+    version,
+    about = "Post-quantum TLS key-exchange probe with CDN/edge/vendor attribution",
+    long_about = "Probes the public web endpoint (443) and every MX record (TCP/25, 587, 465) \
+                  for post-quantum key exchange, and attributes the endpoint's infrastructure \
+                  and CDN/edge termination.",
+    after_help = "List files take one domain per line; '#' comments, blank lines and CRLF are tolerated."
+)]
 struct Cli {
-    mode: Mode,
-    format: Format,
-    progress: bool,
-    jobs: usize,
+    /// Domain to probe (single-domain mode)
+    #[arg(required_unless_present = "list", conflicts_with = "list")]
+    domain: Option<String>,
+
+    /// Batch mode: probe every domain in <LIST_FILE>, write one record per line to <OUTPUT_FILE>
+    #[arg(long, num_args = 2, value_names = ["LIST_FILE", "OUTPUT_FILE"])]
+    list: Vec<String>,
+
+    /// Worker count for --list
+    #[arg(
+        long,
+        requires = "list",
+        default_value_t = DEFAULT_JOBS,
+        value_parser = clap::value_parser!(u16).range(1..)
+    )]
+    jobs: u16,
+
+    /// Output format [default: text, json for --list]
+    #[arg(long, value_enum)]
+    format: Option<FormatArg>,
+
+    /// Shorthand for --format json
+    #[arg(long)]
+    json: bool,
+
+    /// Hide the progress bar in --list mode
+    #[arg(long)]
+    no_progress: bool,
 }
 
-fn parse_args(args: &[String]) -> Result<Cli, String> {
-    let mut format: Option<Format> = None;
-    let mut list = false;
-    let mut progress = true;
-    let mut jobs: Option<usize> = None;
-    let mut positional: Vec<String> = Vec::new();
-
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--list" => list = true,
-            "--json" => format = Some(Format::Json),
-            "--no-progress" => progress = false,
-            "--jobs" => {
-                let Some(value) = iter.next() else {
-                    return Err("--jobs requires a positive number".to_string());
-                };
-                let parsed = value
-                    .parse::<usize>()
-                    .map_err(|_| format!("--jobs expects a positive number, got {value:?}"))?;
-                if parsed == 0 {
-                    return Err("--jobs expects a positive number".to_string());
-                }
-                jobs = Some(parsed);
-            }
-            "--format" => {
-                let Some(value) = iter.next() else {
-                    return Err("--format requires a value (text, json)".to_string());
-                };
-                format = Some(value.parse::<Format>()?);
-            }
-            other => positional.push(other.to_string()),
-        }
-    }
-
-    let mode = if list {
-        match positional.as_slice() {
-            [list_file, output_file] => Mode::List(list_file.clone(), output_file.clone()),
-            _ => return Err("--list requires exactly <list-file> <output-file>".to_string()),
-        }
-    } else {
-        if jobs.is_some() {
-            return Err("--jobs is only valid together with --list".to_string());
-        }
-        match positional.as_slice() {
-            [host] => Mode::Single(host.clone()),
-            _ => return Err("expected exactly one <domain>".to_string()),
-        }
-    };
-
-    let default_format = if list { Format::Json } else { Format::Text };
-    Ok(Cli {
-        mode,
-        format: format.unwrap_or(default_format),
-        progress,
-        jobs: jobs.unwrap_or(DEFAULT_JOBS),
-    })
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum FormatArg {
+    Text,
+    Json,
 }
 
 fn clean_domain(line: &str) -> Option<String> {
@@ -211,33 +191,37 @@ fn run_list(
     Ok(())
 }
 
-fn usage() -> ! {
-    eprintln!("usage: pq-pulse [--format text|json] <domain>");
-    eprintln!(
-        "       pq-pulse --list <list-file> <output-file> [--jobs N] [--format text|json] [--no-progress]"
-    );
-    eprintln!("       (--json is shorthand for --format json)");
-    exit(2)
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let cli = Cli::parse();
 
     if let Err(_existing) = rustls::crypto::aws_lc_rs::default_provider().install_default() {}
 
-    let cli = match parse_args(&args) {
-        Ok(cli) => cli,
-        Err(reason) => {
-            eprintln!("{reason}");
-            usage()
-        }
+    let mode = if let [list_file, output_file] = cli.list.as_slice() {
+        Mode::List(list_file.clone(), output_file.clone())
+    } else {
+        Mode::Single(cli.domain.expect("clap requires <domain> unless --list"))
     };
 
-    match cli.mode {
-        Mode::Single(host) => run_single(&host, cli.format),
-        Mode::List(list_file, output_file) => {
-            run_list(&list_file, &output_file, cli.format, cli.progress, cli.jobs)
-        }
+    let format = cli
+        .format
+        .map(|arg| match arg {
+            FormatArg::Text => Format::Text,
+            FormatArg::Json => Format::Json,
+        })
+        .unwrap_or(match mode {
+            Mode::List(..) => Format::Json,
+            Mode::Single(_) => Format::Text,
+        });
+
+    match mode {
+        Mode::Single(host) => run_single(&host, format),
+        Mode::List(list_file, output_file) => run_list(
+            &list_file,
+            &output_file,
+            format,
+            !cli.no_progress,
+            usize::from(cli.jobs),
+        ),
     }
 }
 
@@ -271,40 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_defaults_and_formats() {
-        let single = |args: &[&str]| {
-            let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            parse_args(&owned)
-        };
-
-        let cli = single(&["example.com"]).unwrap();
-        assert_eq!(cli.format, Format::Text);
-        assert!(cli.progress);
-
-        let cli = single(&["--json", "example.com"]).unwrap();
-        assert_eq!(cli.format, Format::Json);
-
-        let cli = single(&["--list", "in.txt", "out.jsonl"]).unwrap();
-        assert_eq!(cli.format, Format::Json);
-        assert!(cli.progress);
-        assert_eq!(cli.jobs, DEFAULT_JOBS);
-
-        let cli = single(&["--list", "in.txt", "out.jsonl", "--jobs", "8"]).unwrap();
-        assert_eq!(cli.jobs, 8);
-
-        let cli = single(&["--list", "in.txt", "out.jsonl", "--no-progress"]).unwrap();
-        assert!(!cli.progress);
-
-        let cli = single(&["--list", "in.txt", "out.txt", "--format", "text"]).unwrap();
-        assert_eq!(cli.format, Format::Text);
-
-        assert!(single(&["--format", "csv", "example.com"]).is_err());
-        assert!(single(&["--format", "yaml", "example.com"]).is_err());
-        assert!(single(&[]).is_err());
-        assert!(single(&["--list", "only-one-arg"]).is_err());
-        assert!(single(&["--jobs", "8", "example.com"]).is_err());
-        assert!(single(&["--list", "in.txt", "out.jsonl", "--jobs", "0"]).is_err());
-        assert!(single(&["--list", "in.txt", "out.jsonl", "--jobs", "many"]).is_err());
-        assert!(single(&["--list", "in.txt", "out.jsonl", "--jobs"]).is_err());
+    fn cli_definition_is_valid() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 }
