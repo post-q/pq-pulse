@@ -10,10 +10,8 @@ fn label(group: Group) -> &'static str {
 }
 
 fn assert_fixture(domain: &str, expected: Group, metadata: &str) {
-    let Ok(key) = std::env::var(API_KEY_ENV) else {
-        eprintln!("skipped: {API_KEY_ENV} is not set");
-        return;
-    };
+    let key = std::env::var(API_KEY_ENV)
+        .unwrap_or_else(|_| panic!("{API_KEY_ENV} must be set for the acceptance fixtures"));
     let key = key.trim();
     assert!(!key.is_empty(), "{API_KEY_ENV} is set but empty");
 
