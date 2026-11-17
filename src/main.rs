@@ -65,6 +65,10 @@ struct Cli {
     /// Hide the progress bar in --list mode
     #[arg(long)]
     no_progress: bool,
+
+    /// Probe only the web endpoint (443); skip MX/SMTP mail probing
+    #[arg(long)]
+    web_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -86,9 +90,14 @@ fn clean_domain(line: &str) -> Option<String> {
     }
 }
 
-fn run_single(host: &str, format: Format) -> Result<(), Box<dyn std::error::Error>> {
+fn run_single(
+    host: &str,
+    format: Format,
+    web_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let renderer = format.renderer();
-    let context = ScanContext::unlimited();
+    let mut context = ScanContext::unlimited();
+    context.web_only = web_only;
     match check_domain(host, &context) {
         Ok(report) => {
             println!("{}", renderer.document(&report));
@@ -108,6 +117,7 @@ fn run_list(
     format: Format,
     progress: bool,
     jobs: usize,
+    web_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let renderer = format.renderer();
     let mut file = OpenOptions::new()
@@ -121,7 +131,9 @@ fn run_list(
 
     let domains: Vec<String> = content.lines().filter_map(clean_domain).collect();
 
-    let context = Arc::new(ScanContext::polite());
+    let mut context = ScanContext::polite();
+    context.web_only = web_only;
+    let context = Arc::new(context);
 
     let pb = if progress {
         let pb =
@@ -210,17 +222,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .unwrap_or(match mode {
             Mode::List(..) => Format::Json,
+            // `--json` is the documented shorthand for `--format json`.
+            Mode::Single(_) if cli.json => Format::Json,
             Mode::Single(_) => Format::Text,
         });
 
     match mode {
-        Mode::Single(host) => run_single(&host, format),
+        Mode::Single(host) => run_single(&host, format, cli.web_only),
         Mode::List(list_file, output_file) => run_list(
             &list_file,
             &output_file,
             format,
             !cli.no_progress,
             usize::from(cli.jobs),
+            cli.web_only,
         ),
     }
 }

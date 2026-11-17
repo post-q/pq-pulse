@@ -17,6 +17,7 @@ $ pq-pulse <domain> --json               # JSON
 $ pq-pulse --list <list-file> <out-file> # batch, one JSON record per line
 $ pq-pulse --list <list-file> <out-file> --format text --no-progress
 $ pq-pulse --list <list-file> <out-file> --jobs 8
+$ pq-pulse <domain> --web-only            # skip MX/SMTP, probe 443 only
 ```
 
 `--json` is shorthand for `--format json`. Batch defaults to JSON records;
