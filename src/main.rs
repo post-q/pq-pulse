@@ -1,9 +1,3 @@
-mod detect;
-mod model;
-mod normalize;
-mod providers;
-mod render;
-
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -14,9 +8,9 @@ use std::time::Duration;
 
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use render::Format;
+use pq_pulse::render::Format;
 
-use detect::{ScanContext, check_domain};
+use pq_pulse::detect::{ScanContext, check_domain};
 
 const DEFAULT_JOBS: u16 = 4;
 
@@ -69,6 +63,14 @@ struct Cli {
     /// Probe only the web endpoint (443); skip MX/SMTP mail probing
     #[arg(long)]
     web_only: bool,
+
+    /// Refine unconfirmed attributions with semantic reasoning (needs FABRYKA_API_KEY)
+    #[arg(long)]
+    semantic_reasoning: bool,
+
+    /// Print semantic-reasoning request and response traffic
+    #[arg(long)]
+    debug: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -93,12 +95,10 @@ fn clean_domain(line: &str) -> Option<String> {
 fn run_single(
     host: &str,
     format: Format,
-    web_only: bool,
+    context: &ScanContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let renderer = format.renderer();
-    let mut context = ScanContext::unlimited();
-    context.web_only = web_only;
-    match check_domain(host, &context) {
+    let renderer = format.renderer(context.web_only);
+    match check_domain(host, context) {
         Ok(report) => {
             println!("{}", renderer.document(&report));
             Ok(())
@@ -117,9 +117,9 @@ fn run_list(
     format: Format,
     progress: bool,
     jobs: usize,
-    web_only: bool,
+    context: ScanContext,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let renderer = format.renderer();
+    let renderer = format.renderer(context.web_only);
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -131,8 +131,6 @@ fn run_list(
 
     let domains: Vec<String> = content.lines().filter_map(clean_domain).collect();
 
-    let mut context = ScanContext::polite();
-    context.web_only = web_only;
     let context = Arc::new(context);
 
     let pb = if progress {
@@ -152,7 +150,7 @@ fn run_list(
 
     let pending: Mutex<VecDeque<(usize, String)>> =
         Mutex::new(domains.iter().cloned().enumerate().collect());
-    let results: Mutex<Vec<Option<Result<crate::model::DomainReport, String>>>> =
+    let results: Mutex<Vec<Option<Result<pq_pulse::model::DomainReport, String>>>> =
         Mutex::new((0..domains.len()).map(|_| None).collect());
 
     let workers = jobs.min(domains.len().max(1));
@@ -227,17 +225,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Mode::Single(_) => Format::Text,
         });
 
-    match mode {
-        Mode::Single(host) => run_single(&host, format, cli.web_only),
+    if cli.semantic_reasoning {
+        let missing = std::env::var(pq_pulse::detect::decision::API_KEY_ENV)
+            .map(|key| key.is_empty())
+            .unwrap_or(true);
+        if missing {
+            eprintln!(
+                "error: --semantic-reasoning requires {} to be set",
+                pq_pulse::detect::decision::API_KEY_ENV
+            );
+            exit(2);
+        }
+    }
+
+    let mut context = match mode {
+        Mode::List(..) => ScanContext::polite(),
+        Mode::Single(_) => ScanContext::unlimited(),
+    };
+    context.web_only = cli.web_only;
+    context.semantic_reasoning = cli.semantic_reasoning;
+    context.debug = cli.debug;
+
+    let outcome = match mode {
+        Mode::Single(host) => run_single(&host, format, &context),
         Mode::List(list_file, output_file) => run_list(
             &list_file,
             &output_file,
             format,
             !cli.no_progress,
             usize::from(cli.jobs),
-            cli.web_only,
+            context,
         ),
+    };
+
+    if let Err(err) = outcome {
+        eprintln!("error: {err}");
+        exit(1);
     }
+
+    Ok(())
 }
 
 #[cfg(test)]

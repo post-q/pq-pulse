@@ -491,12 +491,10 @@ pub fn attribute_infrastructure(evidence: &Evidence, domain: &str) -> Infrastruc
         .flatten();
     let provider = range_vendor
         .or(evidence.asn.as_ref().and_then(|a| a.vendor))
-        .or(evidence.rdap.as_ref().and_then(|r| r.vendor))
         .or(evidence.ptr.as_ref().and_then(|p| p.vendor))
         .or(evidence.cname.as_ref().and_then(|c| c.vendor))
         .or(evidence.cert.as_ref().and_then(|c| c.vendor))
-        .map(|vendor| vendor.as_str().to_string())
-        .or_else(|| agreed_provider(evidence, &target));
+        .map(|vendor| vendor.as_str().to_string());
 
     Infrastructure {
         owner,
@@ -508,29 +506,7 @@ pub fn attribute_infrastructure(evidence: &Evidence, domain: &str) -> Infrastruc
     }
 }
 
-/// A non-vendor third party named when the AS name and the RDAP netname
-/// agree on the same non-target identity.
-fn agreed_provider(evidence: &Evidence, target: &Option<Identity>) -> Option<String> {
-    let asn = evidence.asn.as_ref().and_then(|a| normalize(&a.asn))?;
-    let rdap = evidence.rdap.as_ref().and_then(|r| normalize(&r.netname))?;
-    if target
-        .as_ref()
-        .is_some_and(|target| matches_identity(&asn, target) || matches_identity(&rdap, target))
-    {
-        return None;
-    }
-    let shorter = if asn.compact.len() <= rdap.compact.len() {
-        &asn.compact
-    } else {
-        &rdap.compact
-    };
-    asn.tokens
-        .iter()
-        .any(|token| rdap.tokens.contains(token))
-        .then(|| display_name(shorter))
-}
-
-/// Whether the endpoint sits behind a provider-managed edge/CDN/WAF,
+/// The registrable zone of a DNS name ("nbp.pl" for "e-zamowienia.nbp.pl"),
 /// and with how much confidence. Role evidence is independent of
 /// ownership: an OVH ASN is hosting, never an edge, and an edge CNAME
 /// alone is not proof either.
@@ -999,7 +975,7 @@ mod tests {
         };
         let infra = attribute_infrastructure(&evidence, "mail.krakowski.pinb.gov.pl");
         assert_eq!(infra.owner, InfraOwner::Ambiguous);
-        assert_eq!(infra.provider.as_deref(), Some("OVH"));
+        assert_eq!(infra.provider, None);
         assert_eq!(infra.target_matches, 1);
         assert_eq!(infra.other_matches, 2);
         assert_eq!(infra.confidence, Confidence::Mixed);

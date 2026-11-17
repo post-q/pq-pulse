@@ -1,5 +1,6 @@
 mod asn;
 mod cert;
+pub mod decision;
 mod dns;
 mod http;
 mod limits;
@@ -7,6 +8,8 @@ mod mail;
 mod ranges;
 mod rdap;
 mod tls;
+
+use std::sync::OnceLock;
 
 use crate::providers::{match_cname_chain_vendor, match_vendor};
 
@@ -20,27 +23,37 @@ use dns::{dig_cname_chain, dig_ptr, resolve};
 use http::probe_http;
 use limits::{HostLocks, Limits, RateLimiter};
 use mail::probe_mail_with_ranges;
+
 use ranges::{VendorRanges, get_vendor_ranges, ip_in_ranges};
 use rdap::rdap_lookup;
 use tls::probe;
 
-pub(crate) struct ScanContext {
+pub struct ScanContext {
     pub(crate) ranges: VendorRanges,
     pub(crate) limits: Option<Limits>,
     /// Probe only the web endpoint (443); skip MX/SMTP mail probing.
-    pub(crate) web_only: bool,
+    pub web_only: bool,
+    /// Refine unconfirmed attributions with semantic reasoning.
+    pub semantic_reasoning: bool,
+    /// Reason of the first decision-model failure; all later checks fail.
+    pub(crate) semantic_reasoning_failed: OnceLock<String>,
+    /// Print semantic-reasoning request and response traffic.
+    pub debug: bool,
 }
 
 impl ScanContext {
-    pub(crate) fn unlimited() -> Self {
+    pub fn unlimited() -> Self {
         Self {
             ranges: get_vendor_ranges(),
             limits: None,
             web_only: false,
+            semantic_reasoning: false,
+            semantic_reasoning_failed: OnceLock::new(),
+            debug: false,
         }
     }
 
-    pub(crate) fn polite() -> Self {
+    pub fn polite() -> Self {
         Self {
             ranges: get_vendor_ranges(),
             limits: Some(Limits {
@@ -48,13 +61,18 @@ impl ScanContext {
                 host_locks: HostLocks::new(),
             }),
             web_only: false,
+            semantic_reasoning: false,
+            semantic_reasoning_failed: OnceLock::new(),
+            debug: false,
         }
     }
 }
 
 /// Detection failures; `Display` forwards the upstream message unchanged.
 #[derive(Debug, Error)]
-pub(crate) enum DetectError {
+pub enum DetectError {
+    #[error("decision model: {0}")]
+    DecisionModel(String),
     #[error("{0}")]
     InvalidServerName(#[from] rustls::pki_types::InvalidDnsNameError),
     #[error("{0}")]
@@ -63,7 +81,7 @@ pub(crate) enum DetectError {
     Io(#[from] std::io::Error),
 }
 
-pub(crate) fn check_domain(host: &str, context: &ScanContext) -> Result<DomainReport, DetectError> {
+pub fn check_domain(host: &str, context: &ScanContext) -> Result<DomainReport, DetectError> {
     let resolved_ip = resolve(host);
 
     let cname_chain = dig_cname_chain(host);
@@ -115,7 +133,7 @@ pub(crate) fn check_domain(host: &str, context: &ScanContext) -> Result<DomainRe
         (tls, cert, http, email, ptr, rdap, asn)
     });
 
-    Ok(DomainReport::build(
+    let mut report = DomainReport::build(
         host.to_string(),
         resolved_ip,
         tls,
@@ -130,5 +148,7 @@ pub(crate) fn check_domain(host: &str, context: &ScanContext) -> Result<DomainRe
         },
         email,
         Local::now(),
-    ))
+    );
+    decision::refine(&mut report, context).map_err(DetectError::DecisionModel)?;
+    Ok(report)
 }

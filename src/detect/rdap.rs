@@ -34,8 +34,21 @@ fn query_rdap(url: &str) -> Option<RdapEvidence> {
                 let netname = json["name"].as_str().unwrap_or("").to_string();
 
                 let mut org_name = String::new();
+                let mut best_rank = -1;
                 if let Some(entities) = json["entities"].as_array() {
                     for entity in entities {
+                        let rank = entity["roles"]
+                            .as_array()
+                            .map(|roles| {
+                                if roles.iter().any(|r| r.as_str() == Some("registrant")) {
+                                    2
+                                } else if roles.iter().any(|r| r.as_str() == Some("abuse")) {
+                                    0
+                                } else {
+                                    1
+                                }
+                            })
+                            .unwrap_or(1);
                         if let Some(vcard) = entity["vcardArray"].as_array()
                             && vcard.len() > 1
                             && let Some(items) = vcard[1].as_array()
@@ -43,8 +56,11 @@ fn query_rdap(url: &str) -> Option<RdapEvidence> {
                             for item in items {
                                 if let Some(arr) = item.as_array()
                                     && arr.first().and_then(|f| f.as_str()) == Some("fn")
-                                    && let Some(name) = arr.get(2).and_then(|v| v.as_str())
+                                    && arr.len() > 3
+                                    && let Some(name) = arr.get(3).and_then(|v| v.as_str())
+                                    && rank > best_rank
                                 {
+                                    best_rank = rank;
                                     org_name = name.to_string();
                                 }
                             }

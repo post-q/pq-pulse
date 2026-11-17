@@ -26,9 +26,72 @@ the file, failed domains become inline error records and the run continues).
 List files take one domain per line; `#` comments, blank lines and CRLF are
 tolerated.
 
+With `--semantic-reasoning`, attributions the rule engine cannot confirm are
+refined by a typed decision model: the rendered scan report (endpoint,
+termination and network evidence) is POSTed as text with a typed choice
+question, and the model's answer overrides the attribution. Requires
+`FABRYKA_API_KEY` in the environment; without the flag the scan is purely
+rule-based.
+`--debug` prints the exact request and response traffic to stderr.
+Acceptance fixtures against the live decision model (8 curated metadata
+blocks): `cargo test --test acceptance` (needs `FABRYKA_API_KEY`; skipped
+with a notice when the key is unset).
+
 ## What it reports
 
-<<<<<<< HEAD
+```
+$ ./pq-pulse example.pl
+
+example.pl
+checked: 2026-09-28 14:40 +02:00
+
+WEB
+  endpoint
+    443/tcp      reachable
+    TLS          TLS 1.3
+    KX           X25519MLKEM768
+    symmetric    AES-128
+    PQ           yes
+
+  termination
+    provider     Imperva
+
+  network
+    IP           203.0.113.10
+    PTR          -
+    ASN          AS64512 EXAMPLE-AS
+    RDAP         EXAMPLE-EDGE-203-0-113
+
+
+MAIL
+  MX 10  mx1.example.pl
+
+    587/tcp      unreachable
+    465/tcp      unreachable
+
+    network
+      IP         198.51.100.53
+      PTR        mx1.example.pl
+      ASN        AS64512 EXAMPLE-AS
+      RDAP       EXAMPLE-NET
+
+  MX 10  mx2.example.pl
+
+    587/tcp      unreachable
+    465/tcp      unreachable
+
+    network
+      IP         198.51.100.54
+      PTR        mx2.example.pl
+      ASN        AS64512 EXAMPLE-AS
+      RDAP       EXAMPLE-NET
+
+
+SUMMARY
+  web            PQ TLS at Imperva edge
+  mail           MX discovered; no reachable SMTP port
+```
+
 - `TLS` / `KX` / `symmetric` / `PQ` — negotiated protocol version, key-exchange
   group and symmetric suite. `X25519MLKEM768` is the post-quantum hybrid
 - `MAIL` — every published MX record (priority preserved), probed on TCP/25,
@@ -74,118 +137,6 @@ facts plus full evidence detail:
   domain (e.g. `*.edgekey.net`), the IP inside a vendor edge range,
   vendor-specific HTTP headers, or vendor-named certificates/RDAP/AS
   entries
-
-| verdict | description |
-| --- | --- |
-| `pq_at_edge` | PQ or hybrid key exchange with at least two independent edge/CDN/WAF indications. |
-| `pq_likely_at_edge` | PQ or hybrid key exchange with one strong edge indication. |
-| `pq_on_org_infra` | PQ or hybrid key exchange on infrastructure attributed to the organization itself. |
-| `pq_on_third_party_infra` | PQ or hybrid key exchange on infrastructure attributed to a third party. |
-| `pq_unattributed` | PQ or hybrid key exchange; infrastructure could not be attributed. |
-| `classical_at_edge` | No PQ key exchange, with at least two independent edge/CDN/WAF indications. |
-| `classical_likely_at_edge` | No PQ key exchange, with one strong edge indication. |
-| `classical_on_org_infra` | No PQ key exchange on infrastructure attributed to the organization itself. |
-| `classical_on_third_party_infra` | No PQ key exchange on infrastructure attributed to a third party. |
-| `classical_unattributed` | No PQ key exchange; infrastructure could not be attributed. |
-| `tls_unavailable` | The HTTPS endpoint was unreachable; PQ status unknown. |
-
-```
-$ ./pq-pulse example.pl
-
-example.pl
-=======
-```
-$ ./pq-pulse example.pl
-
-example.pl
->>>>>>> c79bb03 (docs: Update README.md)
-checked: 2026-09-28 14:40 +02:00
-
-WEB
-  endpoint
-    443/tcp      reachable
-    TLS          TLS 1.3
-    KX           X25519MLKEM768
-    symmetric    AES-128
-    PQ           yes
-
-  termination
-    provider     Imperva
-
-  network
-    IP           203.0.113.10
-    PTR          -
-    ASN          AS64512 EXAMPLE-AS
-    RDAP         EXAMPLE-EDGE-203-0-113
-
-
-MAIL
-  MX 10  mx1.example.pl
-
-    25/tcp       unreachable
-    587/tcp      unreachable
-    465/tcp      unreachable
-
-    network
-      IP         198.51.100.53
-      PTR        mx1.example.pl
-      ASN        AS64512 EXAMPLE-AS
-      RDAP       EXAMPLE-NET
-
-  MX 10  mx2.example.pl
-
-    25/tcp       unreachable
-    587/tcp      unreachable
-    465/tcp      unreachable
-
-    network
-      IP         198.51.100.54
-      PTR        mx2.example.pl
-      ASN        AS64512 EXAMPLE-AS
-      RDAP       EXAMPLE-NET
-
-
-SUMMARY
-  web            PQ TLS at Imperva edge
-  mail           MX discovered; SMTP/25 unreachable from probe
-```
-
-- `TLS` / `KX` / `symmetric` / `PQ` — negotiated protocol version, key-exchange
-  group and symmetric suite. `X25519MLKEM768` is the post-quantum hybrid
-- 7 evidence slots — CNAME delegation chain, matched provider IP range,
-  certificate names (CN + SANs), HTTP edge headers, PTR, RDAP network
-  registration, origin ASN
-- `infrastructure` — who owns the network the endpoint sits on, from
-  independent signal classification against the scan target's identity
-  (derived once from the domain, e.g. `mbank.pl` → `mbank`): CNAME and PTR
-  zone membership, RDAP/AS identity match (normalized, with bounded
-  prefix/subset rules — no unrestricted substrings), certificate subject
-  names, vendor IP ranges. Signals are counted without weights:
-  ≥ 2 agreeing target signals (or ≥ 2 third-party signals) attribute
-  firmly, a lone signal leans (`possibly-*`), a mix of both sides is
-  `ambiguous`, nothing stays `unknown`. Confidence follows the count:
-  `none`, `weak`, `likely`, `confirmed`; contested evidence reports
-  `mixed`. The `provider` name is observed, not looked up from a list:
-  vendor aliases where known (Cloudflare, Akamai, Imperva, Fastly,
-  CloudFront, …), otherwise the identity agreed between the AS name and
-  the RDAP organization (e.g. `OVH` ↔ `OVH-DEDICATED-FO`)
-- `termination` — whether the TLS endpoint is a provider edge, independent of
-  who owns the network: provider identity alone is never role evidence
-  (an OVH ASN is hosting, an AWS ASN is not automatically edge). Edge
-  evidence: CNAME into a vendor edge namespace, IP in a documented edge
-  range, vendor HTTP edge headers, certificate names in an edge namespace,
-  an edge-vendor RDAP/AS name. Two independent classes → `edge`, one strong
-  class → `likely_edge`, otherwise `unproven`
-- `MAIL` — every published MX record (priority preserved), probed on TCP/25,
-  587 and 465 independently. 25/587 speak SMTP: banner, EHLO, STARTTLS
-  detection, in-place TLS upgrade; 465 is implicit TLS from the first byte.
-  `STARTTLS unavailable` is reported distinctly and is never a PQ verdict.
-  Domains without MX records are not probed
-- `SUMMARY` — one phrase for web, one rollup for mail. Mail delivery rides
-  on TCP/25 alone (`PQ enabled` → `classical TLS only` → `TLS failed` →
-  `no TLS` → `MX discovered; SMTP/25 unreachable from probe`); when 25 is
-  unreachable the summary keeps the attribution instead of collapsing to
-  `unreachable`
 
 | verdict | description |
 | --- | --- |

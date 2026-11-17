@@ -4,7 +4,10 @@ use crate::model::{
     SmtpState, TlsState, Verdict,
 };
 
-pub struct TextRenderer;
+#[derive(Default)]
+pub struct TextRenderer {
+    pub web_only: bool,
+}
 
 const VALUE_COLUMN: usize = 17;
 
@@ -86,20 +89,22 @@ impl Renderer for TextRenderer {
                 .unwrap_or("-"),
         ));
 
-        lines.push(String::new());
-        lines.push(String::new());
-        lines.push("MAIL".to_string());
-        match &report.email {
-            None => lines.push("  no MX records".to_string()),
-            Some(email) if email.mx.is_empty() => {
-                lines.push("  no MX records".to_string());
-            }
-            Some(email) => {
-                for (index, probe) in email.mx.iter().enumerate() {
-                    if index > 0 {
-                        lines.push(String::new());
+        if !self.web_only {
+            lines.push(String::new());
+            lines.push(String::new());
+            lines.push("MAIL".to_string());
+            match &report.email {
+                None => lines.push("  no MX records".to_string()),
+                Some(email) if email.mx.is_empty() => {
+                    lines.push("  no MX records".to_string());
+                }
+                Some(email) => {
+                    for (index, probe) in email.mx.iter().enumerate() {
+                        if index > 0 {
+                            lines.push(String::new());
+                        }
+                        lines.extend(mx_lines(probe));
                     }
-                    lines.extend(mx_lines(probe));
                 }
             }
         }
@@ -108,7 +113,9 @@ impl Renderer for TextRenderer {
         lines.push(String::new());
         lines.push("SUMMARY".to_string());
         lines.push(row(2, "web", &web_summary(report)));
-        lines.push(row(2, "mail", &mail_summary(report.email.as_ref())));
+        if !self.web_only {
+            lines.push(row(2, "mail", &mail_summary(report.email.as_ref())));
+        }
         lines.join("\n")
     }
 
@@ -194,42 +201,13 @@ fn mx_lines(probe: &MxProbe) -> Vec<String> {
             .map(|r| r.netname.as_str())
             .unwrap_or("-"),
     ));
-
-    lines.push("    attribution".to_string());
-    lines.push(row(
-        6,
-        "infrastructure",
-        probe.infrastructure.owner.as_str(),
-    ));
-    lines.push(row(
-        6,
-        "operator",
-        &probe
-            .infrastructure
-            .operator
-            .clone()
-            .unwrap_or_else(|| "-".to_string()),
-    ));
-    lines.push(row(
-        6,
-        "provider",
-        &probe
-            .infrastructure
-            .provider
-            .clone()
-            .unwrap_or_else(|| "-".to_string()),
-    ));
-    lines.push(row(
-        6,
-        "confidence",
-        probe.infrastructure.confidence.as_str(),
-    ));
     lines
 }
 
 fn port_lines(port_probe: &PortProbe) -> Vec<String> {
     let label = format!("{}/tcp", port_probe.port.number());
     match &port_probe.state {
+        SmtpState::Unreachable if port_probe.port == Port::Smtp25 => Vec::new(),
         SmtpState::Unreachable => vec![row(4, &label, "unreachable")],
         SmtpState::NoStarttls => {
             let mut lines = vec![row(4, &label, "reachable")];
@@ -301,16 +279,16 @@ fn mail_summary(email: Option<&EmailReport>) -> String {
     let states: Vec<&SmtpState> = email
         .mx
         .iter()
-        .filter_map(|probe| {
-            probe
-                .ports
-                .iter()
-                .find(|port_probe| port_probe.port == Port::Smtp25)
+        .flat_map(|probe| &probe.ports)
+        .filter(|port_probe| {
+            !(port_probe.port == Port::Smtp25 && matches!(port_probe.state, SmtpState::Unreachable))
         })
         .map(|port_probe| &port_probe.state)
         .collect();
-    let unreachable = "MX discovered; SMTP/25 unreachable from probe";
-    let delivery = if states
+    let unreachable = "MX discovered; no reachable SMTP port";
+    let delivery = if states.is_empty() {
+        unreachable.to_string()
+    } else if states
         .iter()
         .any(|state| matches!(state, SmtpState::Tls(session) if session.is_pq()))
     {
@@ -333,9 +311,6 @@ fn mail_summary(email: Option<&EmailReport>) -> String {
     } else {
         unreachable.to_string()
     };
-    if delivery != unreachable {
-        return delivery;
-    }
     let attributed = |owner: InfraOwner| {
         email
             .mx
@@ -379,7 +354,7 @@ mod tests {
 
     #[test]
     fn document_renders_web_sections_and_summary() {
-        let text = TextRenderer.document(&fixture());
+        let text = TextRenderer::default().document(&fixture());
 
         let expected = [
             "citibankonline.pl",
@@ -407,7 +382,7 @@ mod tests {
 
     #[test]
     fn checked_line_uses_minute_precision() {
-        let text = TextRenderer.document(&fixture());
+        let text = TextRenderer::default().document(&fixture());
         assert!(text.starts_with("citibankonline.pl\nchecked: "));
         assert!(!text.contains("checked_at:"));
     }
@@ -422,7 +397,7 @@ mod tests {
             None,
             chrono::Local::now(),
         );
-        let text = TextRenderer.document(&report);
+        let text = TextRenderer::default().document(&report);
         assert!(text.contains("    443/tcp      unreachable"));
         assert!(!text.contains("KX"));
         assert!(!text.contains("PQ"));
@@ -494,12 +469,11 @@ mod tests {
             10,
             "mx1.example.pl",
         );
-        let text = TextRenderer.document(&email_report(vec![probe]));
+        let text = TextRenderer::default().document(&email_report(vec![probe]));
 
         let expected = [
             "MAIL",
             "  MX 10  mx1.example.pl",
-            "    25/tcp       unreachable",
             "    587/tcp      reachable",
             "      STARTTLS   yes",
             "      TLS        TLS 1.3",
@@ -514,19 +488,14 @@ mod tests {
             "      PTR        ptr.mx1.example.pl",
             "      ASN        AS64512 EXAMPLE-AS",
             "      RDAP       EXAMPLE-NET",
-            "    attribution",
-            "      infrastructure  organization-managed",
-            "      operator   -",
-            "      provider   -",
-            "      confidence  confirmed",
             "SUMMARY",
-            "  mail           MX discovered; SMTP/25 unreachable from probe; organization-attributed infrastructure",
+            "  mail           classical TLS only; organization-attributed infrastructure",
         ];
         for line in expected {
             assert!(text.contains(line), "missing line: {line}");
         }
         let mail_section = text.split("MAIL").nth(1).unwrap();
-        assert!(!mail_section.contains("25/tcp\n    587"));
+        assert!(!mail_section.contains("25/tcp"));
     }
 
     #[test]
@@ -539,7 +508,7 @@ mod tests {
             10,
             "mx1.example.pl",
         );
-        let text = TextRenderer.document(&email_report(vec![probe]));
+        let text = TextRenderer::default().document(&email_report(vec![probe]));
         assert!(text.contains("      KX         X25519MLKEM768"));
         assert!(text.contains("      PQ         yes"));
         assert!(text.contains("  mail           PQ enabled"));
@@ -552,14 +521,14 @@ mod tests {
             10,
             "mail.example.com",
         );
-        let text = TextRenderer.document(&email_report(vec![probe]));
+        let text = TextRenderer::default().document(&email_report(vec![probe]));
         let mail_section = text.split("MAIL").nth(1).unwrap();
         assert!(mail_section.contains("    465/tcp      reachable"));
         assert!(mail_section.contains("      TLS        failed"));
         assert!(!mail_section.contains("STARTTLS"));
-        assert!(text.contains(
-            "  mail           MX discovered; SMTP/25 unreachable from probe; organization-attributed infrastructure"
-        ));
+        assert!(
+            text.contains("  mail           TLS failed; organization-attributed infrastructure")
+        );
     }
 
     #[test]
@@ -576,9 +545,9 @@ mod tests {
                 "mx2.example.pl",
             ),
         ]);
-        let text = TextRenderer.document(&report);
+        let text = TextRenderer::default().document(&report);
         assert!(text.contains("    25/tcp       reachable\n      STARTTLS   no"));
-        assert!(text.contains("  mail           no TLS"));
+        assert!(text.contains("  mail           no TLS; organization-attributed infrastructure"));
 
         let report = email_report(vec![mx(
             vec![
@@ -589,23 +558,35 @@ mod tests {
             10,
             "mx1.example.pl",
         )]);
-        let text = TextRenderer.document(&report);
+        let text = TextRenderer::default().document(&report);
         assert!(text.contains(
-            "  mail           MX discovered; SMTP/25 unreachable from probe; organization-attributed infrastructure"
+            "  mail           MX discovered; no reachable SMTP port; organization-attributed infrastructure"
         ));
     }
 
     #[test]
+    fn web_only_omits_mail_sections() {
+        let text = TextRenderer { web_only: true }.document(&fixture());
+        assert!(!text.contains("MAIL"));
+        assert!(!text.contains("mail"));
+        assert!(text.contains("SUMMARY"));
+        assert!(text.contains("web"));
+    }
+
+    #[test]
     fn record_adds_a_blank_line_for_batch_separation() {
-        let record = TextRenderer.record(&fixture());
+        let record = TextRenderer::default().record(&fixture());
         assert!(record.ends_with('\n'));
-        assert_eq!(record, format!("{}\n", TextRenderer.document(&fixture())));
+        assert_eq!(
+            record,
+            format!("{}\n", TextRenderer::default().document(&fixture()))
+        );
     }
 
     #[test]
     fn error_record_is_one_line() {
         assert_eq!(
-            TextRenderer.error_record("x.invalid", "no route"),
+            TextRenderer::default().error_record("x.invalid", "no route"),
             "error checking x.invalid: no route"
         );
     }

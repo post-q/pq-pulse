@@ -45,9 +45,9 @@ impl std::str::FromStr for Format {
 }
 
 impl Format {
-    pub fn renderer(self) -> Box<dyn Renderer> {
+    pub fn renderer(self, web_only: bool) -> Box<dyn Renderer> {
         match self {
-            Format::Text => Box::new(TextRenderer),
+            Format::Text => Box::new(TextRenderer { web_only }),
             Format::Json => Box::new(JsonRenderer),
         }
     }
