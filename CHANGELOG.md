@@ -12,6 +12,7 @@
 ### Miscellaneous Tasks
 - Add release.toml with git-cliff
 - Bump the actions group across 1 directory with 3 updates
+- Release pq-pulse version 0.5.2
 
 ### Other
 - Merge pull request #3 from post-q/dependabot/github_actions/actions-646988e673
