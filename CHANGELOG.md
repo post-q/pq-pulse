@@ -1,4 +1,21 @@
 # Changelog
+## 0.5.2 - 2026-11-17
+
+### Documentation
+- Update README.md
+- Update README.md
+
+### Features
+- Add proper --help cli opt
+- Add --web-only opt
+
+### Miscellaneous Tasks
+- Add release.toml with git-cliff
+- Bump the actions group across 1 directory with 3 updates
+
+### Other
+- Merge pull request #3 from post-q/dependabot/github_actions/actions-646988e673
+
 ## 0.5.1 - 2026-09-28
 
 ### Features
