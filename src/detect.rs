@@ -27,6 +27,8 @@ use tls::probe;
 pub(crate) struct ScanContext {
     pub(crate) ranges: VendorRanges,
     pub(crate) limits: Option<Limits>,
+    /// Probe only the web endpoint (443); skip MX/SMTP mail probing.
+    pub(crate) web_only: bool,
 }
 
 impl ScanContext {
@@ -34,6 +36,7 @@ impl ScanContext {
         Self {
             ranges: get_vendor_ranges(),
             limits: None,
+            web_only: false,
         }
     }
 
@@ -44,6 +47,7 @@ impl ScanContext {
                 limiter: RateLimiter::new(),
                 host_locks: HostLocks::new(),
             }),
+            web_only: false,
         }
     }
 }
@@ -76,8 +80,9 @@ pub(crate) fn check_domain(host: &str, context: &ScanContext) -> Result<DomainRe
     let limiter = context.limits.as_ref().map(|limits| &limits.limiter);
 
     let (tls, cert, http, email, ptr, rdap, asn) = std::thread::scope(|scope| {
-        let mail =
-            scope.spawn(|| probe_mail_with_ranges(host, &context.ranges, context.limits.as_ref()));
+        let mail = (!context.web_only).then(|| {
+            scope.spawn(|| probe_mail_with_ranges(host, &context.ranges, context.limits.as_ref()))
+        });
 
         let (tls, cert_der) = match probe(host, limiter) {
             Ok((facts, cert)) => (TlsState::Tls(facts), cert),
@@ -102,7 +107,10 @@ pub(crate) fn check_domain(host: &str, context: &ScanContext) -> Result<DomainRe
 
         let asn = resolved_ip.and_then(asn_lookup);
 
-        let email = mail.join().unwrap_or_default();
+        let email = match mail {
+            Some(handle) => handle.join().unwrap_or_default(),
+            None => None,
+        };
 
         (tls, cert, http, email, ptr, rdap, asn)
     });
