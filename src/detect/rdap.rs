@@ -70,7 +70,11 @@ fn query_rdap(url: &str) -> Option<RdapEvidence> {
 
                 let combined = format!("{netname} {org_name}");
                 let vendor = match_vendor(&combined);
-                Some(RdapEvidence { netname, vendor })
+                Some(RdapEvidence {
+                    netname,
+                    vendor,
+                    org: (!org_name.is_empty()).then_some(org_name),
+                })
             } else {
                 None
             }

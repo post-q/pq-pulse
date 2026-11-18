@@ -31,7 +31,6 @@ use tls::probe;
 pub struct ScanContext {
     pub(crate) ranges: VendorRanges,
     pub(crate) limits: Option<Limits>,
-    /// Probe only the web endpoint (443); skip MX/SMTP mail probing.
     pub web_only: bool,
     /// Refine unconfirmed attributions with semantic reasoning.
     pub semantic_reasoning: bool,
@@ -97,7 +96,7 @@ pub fn check_domain(host: &str, context: &ScanContext) -> Result<DomainReport, D
 
     let limiter = context.limits.as_ref().map(|limits| &limits.limiter);
 
-    let (tls, cert, http, email, ptr, rdap, asn) = std::thread::scope(|scope| {
+    let (tls, cert, http, page, email, ptr, rdap, asn) = std::thread::scope(|scope| {
         let mail = (!context.web_only).then(|| {
             scope.spawn(|| probe_mail_with_ranges(host, &context.ranges, context.limits.as_ref()))
         });
@@ -109,7 +108,7 @@ pub fn check_domain(host: &str, context: &ScanContext) -> Result<DomainReport, D
 
         let cert = cert_der.as_deref().and_then(cert::parse_cert_evidence);
 
-        let http = probe_http(host);
+        let (http, page) = probe_http(host);
 
         let ptr = resolved_ip
             .and_then(|ip| dig_ptr(&ip.to_string()))
@@ -130,7 +129,7 @@ pub fn check_domain(host: &str, context: &ScanContext) -> Result<DomainReport, D
             None => None,
         };
 
-        (tls, cert, http, email, ptr, rdap, asn)
+        (tls, cert, http, page, email, ptr, rdap, asn)
     });
 
     let mut report = DomainReport::build(
@@ -149,6 +148,7 @@ pub fn check_domain(host: &str, context: &ScanContext) -> Result<DomainReport, D
         email,
         Local::now(),
     );
+    report.page = page;
     decision::refine(&mut report, context).map_err(DetectError::DecisionModel)?;
     Ok(report)
 }

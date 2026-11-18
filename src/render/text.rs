@@ -112,6 +112,9 @@ impl Renderer for TextRenderer {
         lines.push(String::new());
         lines.push(String::new());
         lines.push("SUMMARY".to_string());
+        if let Some(sector) = report.sector.as_ref() {
+            lines.push(row(2, "sector", sector.as_str()));
+        }
         lines.push(row(2, "web", &web_summary(report)));
         if !self.web_only {
             lines.push(row(2, "mail", &mail_summary(report.email.as_ref())));
@@ -431,6 +434,7 @@ mod tests {
                     vendor: None,
                     names: vec![host.to_string()],
                     issuer_cn: None,
+                    org: None,
                 }),
                 ptr: Some(PtrEvidence {
                     record: format!("ptr.{host}"),
@@ -443,6 +447,7 @@ mod tests {
                 rdap: Some(crate::model::RdapEvidence {
                     netname: "EXAMPLE-NET".to_string(),
                     vendor: None,
+                    org: None,
                 }),
                 ..Default::default()
             },
@@ -571,6 +576,22 @@ mod tests {
         assert!(!text.contains("mail"));
         assert!(text.contains("SUMMARY"));
         assert!(text.contains("web"));
+    }
+
+    #[test]
+    fn sector_gets_its_own_summary_row_when_classified() {
+        let mut report = fixture();
+        assert!(!TextRenderer::default().document(&report).contains("sector"));
+        report.sector = Some(crate::model::Sector::Finance);
+        let text = TextRenderer::default().document(&report);
+        assert!(text.contains("SUMMARY"));
+        let summary = text.split("SUMMARY").nth(1).unwrap();
+        assert!(summary.contains("  sector         finance"));
+        assert!(summary.contains("  web           "));
+        assert!(
+            summary.lines().position(|line| line.contains("  sector "))
+                < summary.lines().position(|line| line.starts_with("  web "))
+        );
     }
 
     #[test]

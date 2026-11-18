@@ -13,8 +13,8 @@ use serde_json::json;
 
 use crate::detect::ScanContext;
 use crate::model::{
-    Confidence, DomainReport, InfraOwner, Infrastructure, MxProbe, TlsState, registrable_zone,
-    verdict_of,
+    Confidence, DomainReport, InfraOwner, Infrastructure, MxProbe, Sector, TlsState,
+    registrable_zone, verdict_of,
 };
 use crate::normalize::{display_name, normalize};
 use crate::render::Renderer;
@@ -28,9 +28,21 @@ pub const API_KEY_ENV: &str = "SEMANTIC_REASONING_API_KEY";
 /// Name of the single choice question sent to the decision model.
 const QUESTION: &str = "termination_owner";
 
+/// Name of the sector classification question.
+const SECTOR_QUESTION_NAME: &str = "domain_sector";
+
 pub const WEB_QUESTION: &str = "Who operates the infrastructure terminating the domain's TLS connection, relative to the domain owner?";
 
 pub const MAIL_QUESTION: &str = "Who operates the infrastructure terminating the domain's mail (MX) connection, relative to the domain owner?";
+
+/// Question text for the sector classification.
+const SECTOR_QUESTION_TEXT: &str =
+    "What is the primary business sector of the organization associated with this domain?";
+
+/// Preamble of the sector context; the evidence rows follow as
+/// "Label: value" lines, absent rows omitted.
+const SECTOR_CONTEXT_PREAMBLE: &str =
+    "Use the provided context to determine the most likely sector.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
@@ -50,15 +62,10 @@ pub struct Attribution {
     pub confidence: f64,
 }
 
-/// Refines rule-based attribution with the decision model. No-op when TLS
-/// failed (no handshake to attribute), when the rules already confirmed the
-/// attribution, or when no API key is configured. Any decision-model failure
-/// is returned as an error and trips the run-wide circuit breaker.
+/// Refines rule-based attribution with the decision model for post-quantum
+/// handshakes and classifies the sector whenever evidence exists.
 pub(crate) fn refine(report: &mut DomainReport, context: &ScanContext) -> Result<(), String> {
-    if !context.semantic_reasoning
-        || report.tls == TlsState::Unavailable
-        || report.infrastructure.confidence == Confidence::Confirmed
-    {
+    if !context.semantic_reasoning {
         return Ok(());
     }
     if let Some(reason) = context.semantic_reasoning_failed.get() {
@@ -69,48 +76,227 @@ pub(crate) fn refine(report: &mut DomainReport, context: &ScanContext) -> Result
         _ => return Err(format!("{} is not set", API_KEY_ENV)),
     };
 
-    match decide(
-        &key,
-        &report.domain,
-        &web_metadata(report),
-        WEB_QUESTION,
-        context.debug,
-    ) {
-        Ok(attribution) => {
-            apply(&mut report.infrastructure, attribution, &report.domain);
-            let pq = matches!(&report.tls, TlsState::Tls(session) if session.is_pq());
-            report.verdict = verdict_of(&report.infrastructure, &report.termination, pq);
-        }
-        Err(reason) => {
-            context.semantic_reasoning_failed.set(reason.clone()).ok();
-            return Err(reason);
-        }
-    }
-
-    let Some(email) = report.email.as_mut() else {
-        return Ok(());
-    };
-    for probe in email.mx.iter_mut() {
-        if probe.infrastructure.confidence == Confidence::Confirmed {
-            continue;
-        }
+    if matches!(&report.tls, TlsState::Tls(session) if session.is_pq()) {
         match decide(
             &key,
             &report.domain,
-            &mail_metadata(&report.domain, probe),
-            MAIL_QUESTION,
+            &web_metadata(report),
+            WEB_QUESTION,
             context.debug,
         ) {
             Ok(attribution) => {
-                apply(&mut probe.infrastructure, attribution, &report.domain);
+                apply(&mut report.infrastructure, attribution, &report.domain);
+                report.verdict = verdict_of(&report.infrastructure, &report.termination, true);
             }
             Err(reason) => {
                 context.semantic_reasoning_failed.set(reason.clone()).ok();
                 return Err(reason);
             }
         }
+
+        if let Some(email) = report.email.as_mut() {
+            for probe in email.mx.iter_mut() {
+                if probe.infrastructure.confidence == Confidence::Confirmed {
+                    continue;
+                }
+                match decide(
+                    &key,
+                    &report.domain,
+                    &mail_metadata(&report.domain, probe),
+                    MAIL_QUESTION,
+                    context.debug,
+                ) {
+                    Ok(attribution) => {
+                        apply(&mut probe.infrastructure, attribution, &report.domain);
+                    }
+                    Err(reason) => {
+                        context.semantic_reasoning_failed.set(reason.clone()).ok();
+                        return Err(reason);
+                    }
+                }
+            }
+        }
+    }
+
+    refine_sector(report, context, &key)
+}
+
+/// Classifies the domain's business sector from the page and identity
+/// evidence. Skipped without any evidence rows beyond the domain name;
+/// an `unknown` or low-confidence answer leaves the sector unset. Any
+/// decision-model failure trips the run-wide circuit breaker.
+fn refine_sector(
+    report: &mut DomainReport,
+    context: &ScanContext,
+    key: &str,
+) -> Result<(), String> {
+    let metadata = sector_metadata(report);
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
+    match decide_sector(key, &report.domain, &metadata, context.debug) {
+        Ok(Some(sector)) => report.sector = Some(sector),
+        Ok(None) => {}
+        Err(reason) => {
+            context.semantic_reasoning_failed.set(reason.clone()).ok();
+            return Err(reason);
+        }
     }
     Ok(())
+}
+
+/// The sector context: the template rows that have a value, `None` when
+/// nothing but the domain name is available (not worth a model call).
+fn sector_metadata(report: &DomainReport) -> Option<String> {
+    let mut rows = vec![(true, format!("Domain: {}", report.domain))];
+
+    if let Some(page) = &report.page {
+        for (label, value) in [
+            ("Page title", &page.title),
+            ("Meta description", &page.meta_description),
+            ("Open Graph title", &page.og_title),
+            ("Open Graph description", &page.og_description),
+            ("Industry (JSON-LD)", &page.industry),
+            ("Headings (H1/H2)", &page.headings),
+            ("Page content excerpt", &page.excerpt),
+        ] {
+            if let Some(value) = value {
+                rows.push((true, format!("{label}: {value}")));
+            }
+        }
+    }
+    let organization = report
+        .evidence
+        .cert
+        .as_ref()
+        .and_then(|cert| cert.org.as_ref())
+        .or(report
+            .evidence
+            .rdap
+            .as_ref()
+            .and_then(|rdap| rdap.org.as_ref()));
+    if let Some(organization) = organization {
+        rows.push((true, format!("Organization name: {organization}")));
+    }
+
+    if rows.len() == 1 {
+        return None;
+    }
+    Some(
+        rows.into_iter()
+            .map(|(_, row)| row)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
+/// Posts the sector question and maps the answer. `Ok(None)` means the
+/// model answered `unknown` or below the confidence floor.
+pub fn decide_sector(
+    key: &str,
+    domain: &str,
+    metadata: &str,
+    debug: bool,
+) -> Result<Option<Sector>, String> {
+    let request = sector_request(metadata);
+    if debug {
+        eprintln!(
+            "[debug] {domain} request: {}",
+            serde_json::to_string(&request).unwrap_or_default()
+        );
+    }
+    let response = ureq::post(DECISION_URL)
+        .timeout(TIMEOUT)
+        .set("Authorization", &format!("Bearer {key}"))
+        .send_json(request)
+        .map_err(|err| match err {
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                if debug {
+                    eprintln!("[debug] {domain} error response: {body}");
+                }
+                let detail = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|body| body["error"]["message"].as_str().map(str::to_string))
+                    .unwrap_or_else(|| format!("HTTP {code}"));
+                format!("{detail} (HTTP {code})")
+            }
+            err => {
+                if debug {
+                    eprintln!("[debug] {domain} transport error: {err}");
+                }
+                err.to_string()
+            }
+        })?
+        .into_string()
+        .map_err(|err| format!("unreadable response: {err}"))?;
+    if debug {
+        eprintln!("[debug] {domain} response: {response}");
+    }
+    let parsed: DecisionResponse =
+        serde_json::from_str(&response).map_err(|err| format!("unreadable response: {err}"))?;
+    let answer = parsed
+        .answers
+        .get(SECTOR_QUESTION_NAME)
+        .ok_or_else(|| format!("response has no {SECTOR_QUESTION_NAME} answer"))?;
+    if answer.choice == "unknown" {
+        return Ok(None);
+    }
+    let sector = sector_label(&answer.choice)?;
+    if answer.confidence < 0.5 {
+        return Ok(None);
+    }
+    Ok(sector)
+}
+
+/// Maps a model answer label to the sector; `None` is not representable
+/// here (`unknown` is handled by the caller), so this always yields one.
+fn sector_label(choice: &str) -> Result<Option<Sector>, String> {
+    let sector = match choice {
+        "finance" => Sector::Finance,
+        "retail" => Sector::Retail,
+        "technology" => Sector::Technology,
+        "telecommunications" => Sector::Telecommunications,
+        "government" => Sector::Government,
+        "healthcare" => Sector::Healthcare,
+        "education" => Sector::Education,
+        "media" => Sector::Media,
+        "manufacturing" => Sector::Manufacturing,
+        "energy" => Sector::Energy,
+        "other" => Sector::Other,
+        other => return Err(format!("unexpected answer label: {other}")),
+    };
+    Ok(Some(sector))
+}
+
+/// The sector state payload: preamble, evidence rows, question and the
+/// fixed answer taxonomy with per-label criteria.
+fn sector_request(metadata: &str) -> serde_json::Value {
+    let state = format!("{SECTOR_CONTEXT_PREAMBLE}\n\n{metadata}");
+
+    json!({
+        "state": state,
+        "questions": {
+            SECTOR_QUESTION_NAME: {
+                "type": "choice",
+                "instructions": SECTOR_QUESTION_TEXT,
+                "criteria": {
+                    "finance": "banking, insurance, investment and financial services",
+                    "retail": "e-commerce, marketplaces, online and physical shops",
+                    "technology": "software, SaaS, IT services, hardware",
+                    "telecommunications": "telecom operators, ISPs, hosting providers",
+                    "government": "state institutions, municipalities, public agencies",
+                    "healthcare": "hospitals, clinics, pharma, medical services",
+                    "education": "universities, schools, e-learning",
+                    "media": "news, publishing, entertainment",
+                    "manufacturing": "industrial production, construction, engineering",
+                    "energy": "energy production, utilities, mining",
+                    "other": "a recognizable organization outside the listed sectors",
+                    "unknown": "insufficient or conflicting evidence to determine the sector"
+                }
+            }
+        }
+    })
 }
 
 fn apply(infrastructure: &mut Infrastructure, attribution: Attribution, domain: &str) {
@@ -257,15 +443,14 @@ fn mail_metadata(domain: &str, probe: &MxProbe) -> String {
 }
 
 fn state_request(metadata: &str, question: &str) -> serde_json::Value {
-    let state = format!(
-        "{CONTEXT}\n[metadata]\n{metadata}\n\nQuestion: {question}\n\nanswers:\nFirst-party — operated by the domain owner's organization.\nThird-party hosting — operated by an external cloud or hosting provider, without identified edge termination.\nThird-party edge — terminated by an external CDN, WAF, or managed reverse proxy.\nUnknown — insufficient or conflicting evidence to establish attribution."
-    );
+    let state = format!("{CONTEXT}\n[metadata]\n{metadata}");
 
     json!({
         "state": state,
         "questions": {
             QUESTION: {
                 "type": "choice",
+                "instructions": question,
                 "criteria": {
                     "first_party": "operated by the domain owner's organization",
                     "third_party_hosting": "operated by an external cloud or hosting provider, without identified edge termination",
@@ -456,5 +641,51 @@ mod tests {
             Err("invalid_api_key (HTTP 401)".to_string())
         );
         assert_eq!(report.infrastructure.owner, InfraOwner::Unknown);
+    }
+
+    #[test]
+    fn sector_context_omits_absent_rows() {
+        let mut report = unattributed_report();
+        // Only the domain: no model call.
+        assert_eq!(sector_metadata(&report), None);
+
+        report.page = Some(crate::model::PageSignals {
+            title: Some("Meridian Bank".to_string()),
+            ..Default::default()
+        });
+        let metadata = sector_metadata(&report).expect("page title present");
+        assert!(metadata.starts_with("Domain: citibankonline.pl"));
+        assert!(metadata.contains("\n\nPage title: Meridian Bank"));
+        assert!(!metadata.contains("Meta description"));
+        assert!(!metadata.contains("Organization name"));
+    }
+
+    #[test]
+    fn sector_context_prefers_cert_over_rdap_organization() {
+        let mut report = unattributed_report();
+        let cert = report.evidence.cert.as_mut().unwrap();
+        cert.org = Some("Citibank S.A.".to_string());
+        report.evidence.rdap = Some(crate::model::RdapEvidence {
+            netname: "AKAMAI".to_string(),
+            vendor: None,
+            org: Some("Akamai Technologies".to_string()),
+        });
+        let metadata = sector_metadata(&report).expect("organization present");
+        assert!(metadata.contains("Organization name: Citibank S.A."));
+        assert!(!metadata.contains("Akamai"));
+    }
+
+    #[test]
+    fn sector_labels_map_and_fail_loud() {
+        assert_eq!(sector_label("finance").unwrap(), Some(Sector::Finance));
+        assert_eq!(
+            sector_label("manufacturing").unwrap(),
+            Some(Sector::Manufacturing)
+        );
+        assert_eq!(sector_label("other").unwrap(), Some(Sector::Other));
+        assert_eq!(
+            sector_label("nosuchsector"),
+            Err("unexpected answer label: nosuchsector".to_string())
+        );
     }
 }

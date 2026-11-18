@@ -6,7 +6,8 @@ Checks whether a domain's TLS key exchange is post-quantum. It probes:
 
 and attributes the underlying infrastructure (organization,
 third-party provider, or unknown) plus, independently, whether the TLS
-endpoint is a provider edge/CDN/WAF.
+endpoint is a provider edge/CDN/WAF. With `--semantic-reasoning` it also
+classifies the domain's business sector.
 
 ## Usage
 
@@ -22,8 +23,8 @@ $ pq-pulse <domain> --web-only            # skip MX/SMTP, probe 443 only
 
 - `--json` is shorthand for `--format json` (also the batch default); list
   files take one domain per line, `#` comments and blank lines are skipped
-- `--semantic-reasoning` adds semantic reasoning to collected metadata to set proper attribution with a decision
-  model.
+- `--semantic-reasoning` adds semantic reasoning to metadata processing.
+
   Currently in use API is from [Fabryka.AI](https://fabryka.ai/basal) that delivers `basal-2.0-max` decision model.
 
   **To use it properly**, you have to provide `SEMANTIC_REASONING_API_KEY`. In the case of Fabryka.AI, this is `FABRYKA_API_KEY`.
@@ -80,6 +81,7 @@ MAIL
 
 
 SUMMARY
+  sector         finance
   web            PQ TLS at Imperva edge
   mail           MX discovered; no reachable SMTP port
 ```
@@ -92,7 +94,8 @@ SUMMARY
   `STARTTLS no` is reported explicitly and is never a PQ verdict; an
   unreachable TCP/25 is treated as outbound filtering and omitted from the
   report. Domains without MX records are not probed
-- `SUMMARY` — one phrase for web, one rollup for mail. Mail delivery is
+- `SUMMARY` — `sector` row appears only when the decision model classified
+  it; one phrase for web, one rollup for mail. Mail delivery is
   classified across all reachable SMTP ports (`PQ enabled` →
   `classical TLS only` → `TLS failed` → `no TLS`), falling back to
   `MX discovered; no reachable SMTP port` when nothing answers; attribution
@@ -106,6 +109,9 @@ facts plus full evidence detail:
 - 7 evidence slots — CNAME delegation chain, matched provider IP range,
   certificate names (CN + SANs), HTTP edge headers, PTR, RDAP network
   registration, origin ASN
+- `page` — signals extracted from the response body (title, meta/OG
+  description, JSON-LD industry, headings, text excerpt); `sector` — the
+  decision model's classification, absent when unclassified
 - `infrastructure` — who owns the network the endpoint sits on, from
   independent signal classification against the scan target's identity
   (derived once from the domain, e.g. `mbank.pl` → `mbank`): CNAME and PTR

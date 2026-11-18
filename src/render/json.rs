@@ -78,6 +78,7 @@ struct ReportDto<'a> {
     infrastructure: InfrastructureDto,
     termination: TerminationDto,
     verdict: &'a str,
+    sector: Option<&'a str>,
     email: Option<EmailDto<'a>>,
 }
 
@@ -109,6 +110,7 @@ impl JsonRenderer {
             infrastructure: Self::infrastructure_dto(&report.infrastructure),
             termination: Self::termination_dto(&report.termination),
             verdict: report.verdict.as_str(),
+            sector: report.sector.as_ref().map(|sector| sector.as_str()),
             email: report.email.as_ref().map(Self::email_dto),
         }
     }
@@ -349,6 +351,7 @@ mod tests {
                 rdap: Some(crate::model::RdapEvidence {
                     netname: "ALLEGRO-HOSTING".to_string(),
                     vendor: None,
+                    org: None,
                 }),
                 asn: Some(crate::model::AsnEvidence {
                     asn: "AS396982 GOOGLE-CLOUD-PLATFORM".to_string(),
@@ -390,10 +393,12 @@ mod tests {
                     vendor: None,
                     names: vec!["edge.business.allegro.pl".to_string()],
                     issuer_cn: None,
+                    org: None,
                 }),
                 rdap: Some(crate::model::RdapEvidence {
                     netname: "ALLEGRO-NET".to_string(),
                     vendor: None,
+                    org: None,
                 }),
                 asn: Some(crate::model::AsnEvidence {
                     asn: "AS42656 ALLEGRO".to_string(),
@@ -454,6 +459,7 @@ mod tests {
                     vendor: None,
                     names: vec![host.to_string()],
                     issuer_cn: None,
+                    org: None,
                 }),
                 ..Default::default()
             },

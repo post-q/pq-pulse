@@ -214,6 +214,8 @@ pub struct CertEvidence {
     /// Every observed name: subject CN, issuer CN and SANs.
     pub names: Vec<String>,
     pub issuer_cn: Option<String>,
+    /// Subject organization attribute (O=), when present.
+    pub org: Option<String>,
 }
 
 /// A vendor-specific HTTP response header observed on a live request.
@@ -236,6 +238,76 @@ pub struct PtrEvidence {
 pub struct RdapEvidence {
     pub netname: String,
     pub vendor: Option<Vendor>,
+    /// Registrant organization from the RDAP vCard, when present.
+    pub org: Option<String>,
+}
+
+/// Business sector of the domain's organization, classified by the
+/// decision model when `--semantic-reasoning` is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sector {
+    Finance,
+    Retail,
+    Technology,
+    Telecommunications,
+    Government,
+    Healthcare,
+    Education,
+    Media,
+    Manufacturing,
+    Energy,
+    Other,
+    Unknown,
+}
+
+impl Sector {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Sector::Finance => "finance",
+            Sector::Retail => "retail",
+            Sector::Technology => "technology",
+            Sector::Telecommunications => "telecommunications",
+            Sector::Government => "government",
+            Sector::Healthcare => "healthcare",
+            Sector::Education => "education",
+            Sector::Media => "media",
+            Sector::Manufacturing => "manufacturing",
+            Sector::Energy => "energy",
+            Sector::Other => "other",
+            Sector::Unknown => "unknown",
+        }
+    }
+}
+
+/// Text signals extracted from the fetched index page, used as sector
+/// classification context. Every slot is absent when the HTML does not
+/// yield it (thin shells, bot walls).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageSignals {
+    pub title: Option<String>,
+    pub meta_description: Option<String>,
+    pub og_title: Option<String>,
+    pub og_description: Option<String>,
+    /// `industry` (or `@type`) from the first JSON-LD block.
+    pub industry: Option<String>,
+    /// First H1/H2 heading texts, "; "-joined.
+    pub headings: Option<String>,
+    /// First ~1 KB of visible page text.
+    pub excerpt: Option<String>,
+}
+
+impl PageSignals {
+    /// True when no slot carries a value; such a page adds nothing to
+    /// the sector context.
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.meta_description.is_none()
+            && self.og_title.is_none()
+            && self.og_description.is_none()
+            && self.industry.is_none()
+            && self.headings.is_none()
+            && self.excerpt.is_none()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -699,6 +771,11 @@ pub struct DomainReport {
     pub termination: Termination,
     pub verdict: Verdict,
     pub email: Option<EmailReport>,
+    /// Text signals from the fetched index page; `None` when the request
+    /// failed or yielded nothing.
+    pub page: Option<PageSignals>,
+    /// Decision-model sector classification; `None` when unavailable.
+    pub sector: Option<Sector>,
 }
 
 impl DomainReport {
@@ -731,6 +808,8 @@ impl DomainReport {
             termination,
             verdict,
             email,
+            page: None,
+            sector: None,
         }
     }
 }
@@ -787,6 +866,7 @@ pub fn fixture() -> DomainReport {
             name: "www.citi.com".to_string(),
             names: vec!["www.citi.com".to_string(), "citibankonline.pl".to_string()],
             issuer_cn: Some("DigiCert TLS RSA SHA256 2020 CA1".to_string()),
+            org: None,
         }),
         http: Some(HttpEvidence {
             header: "X-Akamai-Request-ID".to_string(),
@@ -799,6 +879,7 @@ pub fn fixture() -> DomainReport {
         rdap: Some(RdapEvidence {
             netname: "AKAMAI".to_string(),
             vendor: Some(Vendor::Akamai),
+            org: None,
         }),
         asn: Some(AsnEvidence {
             asn: "AS20940 AKAMAI-ASN1".to_string(),
@@ -880,6 +961,7 @@ mod tests {
             rdap: Some(RdapEvidence {
                 netname: "PL-MBANKPL".to_string(),
                 vendor: None,
+                org: None,
             }),
             ..Default::default()
         };
@@ -902,6 +984,7 @@ mod tests {
             rdap: Some(RdapEvidence {
                 netname: "PL-MBANKPL".to_string(),
                 vendor: None,
+                org: None,
             }),
             ptr: Some(PtrEvidence {
                 record: "war01mail1.brebank.com.pl".to_string(),
@@ -939,6 +1022,7 @@ mod tests {
                 vendor: None,
                 names: vec!["mail.example.com".to_string()],
                 issuer_cn: Some("DigiCert Global CA".to_string()),
+                org: None,
             }),
             asn: Some(AsnEvidence {
                 asn: "AS20940 AKAMAI-ASN1".to_string(),
@@ -947,6 +1031,7 @@ mod tests {
             rdap: Some(RdapEvidence {
                 netname: "AKAMAI".to_string(),
                 vendor: Some(Vendor::Akamai),
+                org: None,
             }),
             ..Default::default()
         };
@@ -966,6 +1051,7 @@ mod tests {
             rdap: Some(RdapEvidence {
                 netname: "OVH-DEDICATED-FO".to_string(),
                 vendor: None,
+                org: None,
             }),
             asn: Some(AsnEvidence {
                 asn: "AS16276 OVH".to_string(),
@@ -1042,6 +1128,7 @@ mod tests {
                 vendor: None,
                 names: vec!["edge.example.com.akamaiedge.net".to_string()],
                 issuer_cn: None,
+                org: None,
             }),
             ..Default::default()
         };
@@ -1083,6 +1170,7 @@ mod tests {
             rdap: Some(RdapEvidence {
                 netname: "ALLEGRO-NET".to_string(),
                 vendor: None,
+                org: None,
             }),
             asn: Some(AsnEvidence {
                 asn: "AS42656 ALLEGRO".to_string(),
@@ -1109,6 +1197,7 @@ mod tests {
             rdap: Some(RdapEvidence {
                 netname: "ALLEGRO-NET".to_string(),
                 vendor: None,
+                org: None,
             }),
             asn: Some(AsnEvidence {
                 asn: "AS42656 QXL-POLAND".to_string(),
@@ -1153,6 +1242,7 @@ mod tests {
             rdap: Some(RdapEvidence {
                 netname: "EXAMPLE-NET".to_string(),
                 vendor: None,
+                org: None,
             }),
             ..Default::default()
         };
@@ -1196,6 +1286,7 @@ mod tests {
                 vendor: None,
                 names: vec!["mail.example.com".to_string()],
                 issuer_cn: None,
+                org: None,
             }),
             ..Default::default()
         };
@@ -1218,6 +1309,7 @@ mod tests {
                 vendor: None,
                 names: vec!["www.othername.org".to_string(), "ACME-CA".to_string()],
                 issuer_cn: Some("ACME-CA".to_string()),
+                org: None,
             }),
             ..Default::default()
         };

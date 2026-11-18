@@ -19,6 +19,14 @@ pub(crate) fn parse_cert_evidence(cert_der: &[u8]) -> Option<CertEvidence> {
         .next()
         .and_then(|cn| cn.attr_value().as_str().ok());
 
+    // Subject organization attribute (OID 2.5.4.10).
+    let org = cert
+        .subject()
+        .iter_attributes()
+        .find(|attr| attr.attr_type() == &x509_parser::oid_registry::OID_X509_ORGANIZATION_NAME)
+        .and_then(|attr| attr.as_str().ok())
+        .map(String::from);
+
     let mut names: Vec<String> = Vec::new();
     for name in [subject_cn, issuer_cn].into_iter().flatten() {
         if !names.contains(&name.to_string()) {
@@ -46,5 +54,6 @@ pub(crate) fn parse_cert_evidence(cert_der: &[u8]) -> Option<CertEvidence> {
         vendor,
         names,
         issuer_cn: issuer_cn.map(String::from),
+        org,
     })
 }
