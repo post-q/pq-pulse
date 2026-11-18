@@ -1,33 +1,44 @@
 # Changelog
-## 0.5.2 - 2026-11-17
+## 0.6.0 - 2026-11-18
+
+### Bug Fixes
+- Introduce SEMANTIC_REASONING_API_KEY
+
+### Documentation
+- Update readme
+- Update README.md
+
+### Features
+- Integrate semantic reasoning
+
+### Other
+- Ci fix
+- Dont run acc tests
+- Run acc tests
+
+## 0.5.2 - 2026-11-18
 
 ### Documentation
 - Update README.md
 - Update README.md
 
 ### Features
+- Add termination signal in favor of infra/edge signals
+- Provide clear verdict rules
+- Improve batch scanning
 - Add proper --help cli opt
 - Add --web-only opt
 
 ### Miscellaneous Tasks
+- Release pq-pulse version 0.5.0
+- Update README.md
+- Release pq-pulse version 0.5.1
 - Add release.toml with git-cliff
 - Bump the actions group across 1 directory with 3 updates
 - Release pq-pulse version 0.5.2
 
 ### Other
 - Merge pull request #3 from post-q/dependabot/github_actions/actions-646988e673
-
-## 0.5.1 - 2026-09-28
-
-### Features
-- Add termination signal in favor of infra/edge signals
-- Provide clear verdict rules
-- Improve batch scanning
-
-### Miscellaneous Tasks
-- Release pq-pulse version 0.5.0
-- Update README.md
-- Release pq-pulse version 0.5.1
 
 ## 0.4.0 - 2026-09-21
 
