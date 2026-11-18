@@ -4,3 +4,7 @@
 # Regenerate CHANGELOG.md via git-cliff before the release commit,
 # so the changelog update is included in the release commit and tag.
 pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
+
+# cargo-release only bumps, commits, tags, and pushes;
+# crates.io publishing happens in GH CI (.github/workflows/release.yml publish job).
+publish = false
