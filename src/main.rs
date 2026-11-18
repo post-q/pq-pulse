@@ -64,7 +64,7 @@ struct Cli {
     #[arg(long)]
     web_only: bool,
 
-    /// Refine unconfirmed attributions with semantic reasoning (needs FABRYKA_API_KEY)
+    /// Refine unconfirmed attributions with semantic reasoning (needs SEMANTIC_REASONING_API_KEY)
     #[arg(long)]
     semantic_reasoning: bool,
 

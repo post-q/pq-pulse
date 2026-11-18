@@ -30,12 +30,12 @@ With `--semantic-reasoning`, attributions the rule engine cannot confirm are
 refined by a typed decision model: the rendered scan report (endpoint,
 termination and network evidence) is POSTed as text with a typed choice
 question, and the model's answer overrides the attribution. Requires
-`FABRYKA_API_KEY` in the environment; without the flag the scan is purely
-rule-based.
+`SEMANTIC_REASONING_API_KEY` in the environment; without the flag the scan
+is purely rule-based.
 `--debug` prints the exact request and response traffic to stderr.
 Acceptance fixtures against the live decision model (8 curated metadata
-blocks): `cargo test --test acceptance` (needs `FABRYKA_API_KEY`; skipped
-with a notice when the key is unset).
+blocks): `cargo test --test acceptance` (needs `SEMANTIC_REASONING_API_KEY`;
+the tests fail hard when the key is unset).
 
 ## What it reports
 

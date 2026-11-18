@@ -23,7 +23,7 @@ use crate::render::Renderer;
 const DECISION_URL: &str = "https://fabryka.ai/v1/systemone";
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// Environment variable holding the inference API key.
-pub const API_KEY_ENV: &str = "FABRYKA_API_KEY";
+pub const API_KEY_ENV: &str = "SEMANTIC_REASONING_API_KEY";
 
 /// Name of the single choice question sent to the decision model.
 const QUESTION: &str = "termination_owner";
