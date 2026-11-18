@@ -13,8 +13,8 @@ use serde_json::json;
 
 use crate::detect::ScanContext;
 use crate::model::{
-    Confidence, DomainReport, InfraOwner, Infrastructure, MxProbe, Sector, TlsState,
-    registrable_zone, verdict_of,
+    Confidence, DomainReport, InfraOwner, Infrastructure, MxProbe, Sector, TerminationRole,
+    TlsState, registrable_zone, verdict_of,
 };
 use crate::normalize::{display_name, normalize};
 use crate::render::Renderer;
@@ -62,8 +62,9 @@ pub struct Attribution {
     pub confidence: f64,
 }
 
-/// Refines rule-based attribution with the decision model for post-quantum
-/// handshakes and classifies the sector whenever evidence exists.
+/// Refines rule-based attribution with the decision model whenever a TLS
+/// handshake was established — post-quantum or classical — and classifies
+/// the sector whenever evidence exists.
 pub(crate) fn refine(report: &mut DomainReport, context: &ScanContext) -> Result<(), String> {
     if !context.semantic_reasoning {
         return Ok(());
@@ -76,7 +77,8 @@ pub(crate) fn refine(report: &mut DomainReport, context: &ScanContext) -> Result
         _ => return Err(format!("{} is not set", API_KEY_ENV)),
     };
 
-    if matches!(&report.tls, TlsState::Tls(session) if session.is_pq()) {
+    if let TlsState::Tls(session) = &report.tls {
+        let pq = session.is_pq();
         match decide(
             &key,
             &report.domain,
@@ -86,7 +88,10 @@ pub(crate) fn refine(report: &mut DomainReport, context: &ScanContext) -> Result
         ) {
             Ok(attribution) => {
                 apply(&mut report.infrastructure, attribution, &report.domain);
-                report.verdict = verdict_of(&report.infrastructure, &report.termination, true);
+                if report.termination.role == TerminationRole::Unproven {
+                    report.termination.confidence = report.infrastructure.confidence;
+                }
+                report.verdict = verdict_of(&report.infrastructure, &report.termination, pq);
             }
             Err(reason) => {
                 context.semantic_reasoning_failed.set(reason.clone()).ok();
