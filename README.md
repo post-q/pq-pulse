@@ -24,7 +24,9 @@ $ pq-pulse <domain> --web-only            # skip MX/SMTP, probe 443 only
   files take one domain per line, `#` comments and blank lines are skipped
 - `--semantic-reasoning` adds semantic reasoning to collected metadata to set proper attribution with a decision
   model.
-  Currently in use API is from [Fabryka.AI](https://fabryka.ai/basal) that delivers basal-2.0-max decision model.  To use it properly you have to provide `SEMANTIC_REASONING_API_KEY`. In the case of Fabryka.AI, this is `FABRYKA_API_KEY`.
+  Currently in use API is from [Fabryka.AI](https://fabryka.ai/basal) that delivers `basal-2.0-max` decision model.
+
+  **To use it properly**, you have to provide `SEMANTIC_REASONING_API_KEY`. In the case of Fabryka.AI, this is `FABRYKA_API_KEY`.
 - `--debug` dumps request/response traffic.
 
 ## What it reports
