@@ -20,22 +20,12 @@ $ pq-pulse --list <list-file> <out-file> --jobs 8
 $ pq-pulse <domain> --web-only            # skip MX/SMTP, probe 443 only
 ```
 
-`--json` is shorthand for `--format json`. Batch defaults to JSON records;
-stdout shows a progress bar, `--no-progress` silences it (records still land in
-the file, failed domains become inline error records and the run continues).
-List files take one domain per line; `#` comments, blank lines and CRLF are
-tolerated.
-
-With `--semantic-reasoning`, attributions the rule engine cannot confirm are
-refined by a typed decision model: the rendered scan report (endpoint,
-termination and network evidence) is POSTed as text with a typed choice
-question, and the model's answer overrides the attribution. Requires
-`SEMANTIC_REASONING_API_KEY` in the environment; without the flag the scan
-is purely rule-based.
-`--debug` prints the exact request and response traffic to stderr.
-Acceptance fixtures against the live decision model (8 curated metadata
-blocks): `cargo test --test acceptance` (needs `SEMANTIC_REASONING_API_KEY`;
-the tests fail hard when the key is unset).
+- `--json` is shorthand for `--format json` (also the batch default); list
+  files take one domain per line, `#` comments and blank lines are skipped
+- `--semantic-reasoning` adds semantic reasoning to collected metadata to set proper attribution with a decision
+  model.
+  Currently in use API is from [Fabryka.AI](https://fabryka.ai/basal) that delivers basal-2.0-max decision model.  To use it properly you have to provide `SEMANTIC_REASONING_API_KEY`. In the case of Fabryka.AI, this is `FABRYKA_API_KEY`.
+- `--debug` dumps request/response traffic.
 
 ## What it reports
 
