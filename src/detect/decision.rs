@@ -293,7 +293,7 @@ fn sector_request(metadata: &str) -> serde_json::Value {
                     "government": "state institutions, municipalities, public agencies",
                     "healthcare": "hospitals, clinics, pharma, medical services",
                     "education": "universities, schools, e-learning",
-                    "media": "news, publishing, entertainment",
+                    "media": "news, journalism, publishing, encyclopedias, information and content platforms, entertainment",
                     "manufacturing": "industrial production, construction, engineering",
                     "energy": "energy production, utilities, mining",
                     "other": "a recognizable organization outside the listed sectors",
