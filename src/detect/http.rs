@@ -8,10 +8,10 @@ use crate::providers::match_http_header_vendor;
 /// back vendor-specific response headers. Non-Akamai servers ignore them.
 const PRAGMA: &str = "akamai-x-cache-on, akamai-x-get-request-id, akamai-x-check-cacheable";
 
-/// One lightweight HTTPS request against the host. A vendor-specific
-/// response header — and only that — is HTTP evidence that the request
-/// was actually processed by the vendor edge. The body is kept for
-/// page-signal extraction.
+fn ascii_lower(text: &str) -> String {
+    text.chars().map(|c| c.to_ascii_lowercase()).collect()
+}
+
 pub(crate) fn probe_http(host: &str) -> (Option<HttpEvidence>, Option<PageSignals>) {
     let url = format!("https://{host}/");
     let response = match ureq::get(&url)
@@ -30,11 +30,8 @@ pub(crate) fn probe_http(host: &str) -> (Option<HttpEvidence>, Option<PageSignal
     (evidence, page)
 }
 
-/// Extracts sector-classification signals from an HTML document: title,
-/// meta/OG descriptions, JSON-LD industry, headings and a short visible
-/// text excerpt. Slots stay empty when the markup does not yield them.
 pub(crate) fn page_signals(html: &str) -> PageSignals {
-    let lower = html.to_lowercase();
+    let lower = ascii_lower(html);
 
     let title = tag_contents(html, &lower, "<title", "</title>");
     let meta_description = meta_content(html, &lower, "name", "description");
@@ -86,7 +83,7 @@ fn meta_content(html: &str, lower: &str, attr: &str, key_value: &str) -> Option<
 
 /// Value of `attribute="value"` inside one raw tag, original casing.
 fn tag_attribute_value(raw_tag: &str, attribute: &str) -> Option<String> {
-    let lower = raw_tag.to_lowercase();
+    let lower = ascii_lower(raw_tag);
     let needle = format!("{attribute}=\"");
     let position = lower.find(&needle)? + needle.len();
     let rest = &raw_tag[position..];
@@ -163,7 +160,7 @@ fn excerpt(html: &str, lower: &str) -> Option<String> {
         }
         None => html,
     };
-    let lower = html.to_lowercase();
+    let lower = ascii_lower(html);
     let mut cleaned = String::with_capacity(html.len());
     let mut offset = 0;
     loop {
@@ -382,5 +379,28 @@ mod tests {
         let signals = page_signals("<html><body>plain text only</body></html>");
         assert_eq!(signals.title, None);
         assert_eq!(signals.excerpt.as_deref(), Some("plain text only"));
+    }
+
+    #[test]
+    fn unicode_expanding_lowercase_does_not_desynchronize_offsets() {
+        let title = "İstanbul Bank — Online Banking";
+        let html = format!(
+            r#"<html><head>
+            <title>{title}</title>
+            <meta name="description" content="Banking for everyone.">
+        </head><body>
+            <h1>Merhaba</h1>
+            <p>{}İstanbul.</p>
+        </body></html>"#,
+            "İ".repeat(8)
+        );
+        let signals = page_signals(&html);
+        assert_eq!(signals.title.as_deref(), Some(title));
+        assert_eq!(
+            signals.meta_description.as_deref(),
+            Some("Banking for everyone.")
+        );
+        assert_eq!(signals.headings.as_deref(), Some("Merhaba"));
+        assert!(signals.excerpt.unwrap().contains("İstanbul."));
     }
 }
