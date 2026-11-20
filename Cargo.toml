@@ -1,6 +1,6 @@
 [package]
 name = "pq-pulse"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"
 description = "Post-quantum TLS key-exchange probe with CDN/edge/vendor attribution of the endpoint"
 license = "EUPL-1.2"
