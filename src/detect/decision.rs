@@ -28,6 +28,10 @@ pub const API_KEY_ENV: &str = "SEMANTIC_REASONING_API_KEY";
 /// Name of the single choice question sent to the decision model.
 const QUESTION: &str = "termination_owner";
 
+/// RIPE database search resolving opaque RDAP netnames when the model
+/// answers `unknown`.
+const RIPE_SEARCH_URL: &str = "https://rest.db.ripe.net/search.json";
+
 /// Name of the sector classification question.
 const SECTOR_QUESTION_NAME: &str = "domain_sector";
 
@@ -79,11 +83,12 @@ pub(crate) fn refine(report: &mut DomainReport, context: &ScanContext) -> Result
 
     if let TlsState::Tls(session) = &report.tls {
         let pq = session.is_pq();
-        match decide(
+        match decide_enriched(
             &key,
             &report.domain,
             &web_metadata(report),
             WEB_QUESTION,
+            report.evidence.rdap.as_ref().map(|r| r.netname.as_str()),
             context.debug,
         ) {
             Ok(attribution) => {
@@ -104,11 +109,12 @@ pub(crate) fn refine(report: &mut DomainReport, context: &ScanContext) -> Result
                 if probe.infrastructure.confidence == Confidence::Confirmed {
                     continue;
                 }
-                match decide(
+                match decide_enriched(
                     &key,
                     &report.domain,
                     &mail_metadata(&report.domain, probe),
                     MAIL_QUESTION,
+                    probe.evidence.rdap.as_ref().map(|r| r.netname.as_str()),
                     context.debug,
                 ) {
                     Ok(attribution) => {
@@ -387,6 +393,108 @@ pub fn decide(
     let parsed: DecisionResponse =
         serde_json::from_str(&response).map_err(|err| format!("unreadable response: {err}"))?;
     parse_response(&parsed)
+}
+
+/// Attributes one question, retrying once on `unknown`: the RDAP netname
+/// is resolved against the RIPE database and the org-name/descr/remarks
+/// rows are appended to the metadata, which lets the model attribute
+/// opaque registry handles like `TASK-UG`. A missing netname, an empty
+/// lookup or a failed lookup (debug-logged, non-fatal) keeps the first
+/// answer.
+fn decide_enriched(
+    key: &str,
+    domain: &str,
+    metadata: &str,
+    question: &str,
+    netname: Option<&str>,
+    debug: bool,
+) -> Result<Attribution, String> {
+    let attribution = decide(key, domain, metadata, question, debug)?;
+    if attribution.group != Group::Unattributable {
+        return Ok(attribution);
+    }
+    let netname = netname
+        .map(str::trim)
+        .filter(|netname| !netname.is_empty() && *netname != "-");
+    let netname = match netname {
+        Some(netname) => netname,
+        None => return Ok(attribution),
+    };
+    let extension = match ripe_lookup(netname) {
+        Ok(Some(extension)) => extension,
+        Ok(None) => return Ok(attribution),
+        Err(reason) => {
+            if debug {
+                eprintln!("[debug] {domain} ripe lookup failed: {reason}");
+            }
+            return Ok(attribution);
+        }
+    };
+    decide(
+        key,
+        domain,
+        &format!("{metadata}\n\n{extension}"),
+        question,
+        debug,
+    )
+}
+
+/// Queries the RIPE database for the netname and renders the collected
+/// rows as a metadata block; `None` when nothing usable is returned.
+fn ripe_lookup(netname: &str) -> Result<Option<String>, String> {
+    let response = ureq::get(RIPE_SEARCH_URL)
+        .timeout(TIMEOUT)
+        .query("query-string", netname)
+        .query("flags", "no-personal")
+        .call()
+        .map_err(|err| err.to_string())?;
+    let body = response
+        .into_string()
+        .map_err(|err| format!("unreadable response: {err}"))?;
+    let rows = ripe_rows(&body)?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(ripe_block(netname, &rows)))
+}
+
+/// The extension block: header naming the queried handle, then the
+/// registry rows aligned with the metadata's value column.
+fn ripe_block(netname: &str, rows: &[(String, String)]) -> String {
+    let mut lines = vec![format!("  RIPE lookup ({netname})")];
+    for (name, value) in rows {
+        lines.push(format!("    {name:<13}{value}"));
+    }
+    lines.join("\n")
+}
+
+/// Collects unique org-name/descr/remarks attribute values from a RIPE
+/// search response, in document order.
+fn ripe_rows(body: &str) -> Result<Vec<(String, String)>, String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|err| format!("unreadable response: {err}"))?;
+    let objects = parsed["objects"]["object"].as_array();
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for object in objects.into_iter().flatten() {
+        let Some(attributes) = object["attributes"]["attribute"].as_array() else {
+            continue;
+        };
+        for attribute in attributes {
+            let name = attribute["name"].as_str().unwrap_or_default();
+            if !matches!(name, "org-name" | "descr" | "remarks") {
+                continue;
+            }
+            let value = attribute["value"].as_str().unwrap_or_default().trim();
+            if value.is_empty() {
+                continue;
+            }
+            let row = (name.to_string(), value.to_string());
+            if !rows.contains(&row) {
+                rows.push(row);
+            }
+        }
+    }
+    Ok(rows)
 }
 
 fn web_metadata(report: &DomainReport) -> String {
@@ -691,6 +799,57 @@ mod tests {
         assert_eq!(
             sector_label("nosuchsector"),
             Err("unexpected answer label: nosuchsector".to_string())
+        );
+    }
+
+    #[test]
+    fn ripe_rows_collect_unique_relevant_attributes() {
+        let body = r#"{
+          "objects": {"object": [
+            {"attributes": {"attribute": [
+              {"name": "netname", "value": "TASK-UG"},
+              {"name": "descr", "value": "TASK Academic Computer Network"},
+              {"name": "descr", "value": "University of Gdansk"},
+              {"name": "remarks", "value": "  "},
+              {"name": "country", "value": "PL"}
+            ]}},
+            {"attributes": {"attribute": [
+              {"name": "descr", "value": "University of Gdansk"},
+              {"name": "org-name", "value": "TASK Academic Computer Network"}
+            ]}}
+          ]}
+        }"#;
+        assert_eq!(
+            ripe_rows(body).unwrap(),
+            vec![
+                (
+                    "descr".to_string(),
+                    "TASK Academic Computer Network".to_string()
+                ),
+                ("descr".to_string(), "University of Gdansk".to_string()),
+                (
+                    "org-name".to_string(),
+                    "TASK Academic Computer Network".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn ripe_rows_tolerate_empty_and_reject_unreadable_responses() {
+        assert!(ripe_rows("{}").unwrap().is_empty());
+        assert!(ripe_rows("not json").is_err());
+    }
+
+    #[test]
+    fn ripe_block_aligns_rows_under_the_metadata_column() {
+        let block = ripe_block(
+            "TASK-UG",
+            &[("descr".to_string(), "University of Gdansk".to_string())],
+        );
+        assert_eq!(
+            block,
+            "  RIPE lookup (TASK-UG)\n    descr        University of Gdansk"
         );
     }
 }
