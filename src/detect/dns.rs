@@ -113,17 +113,23 @@ pub(crate) fn dig_ptr(ip: &str) -> Option<String> {
 
 /// First TXT record of a name, without the surrounding quotes.
 pub(crate) fn dig_txt(name: &str) -> Option<String> {
-    let output = Command::new("dig")
-        .args(["+short", name, "TXT"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().next()?.trim();
-    if line.is_empty() {
-        None
-    } else {
-        Some(line.trim_matches('"').to_string())
+    // One lost UDP packet or a resolver hiccup must not drop the
+    // evidence, so the query retries once; every attempt is bounded.
+    for _ in 0..2 {
+        let output = Command::new("dig")
+            .args(["+short", "+time=3", "+tries=1", name, "TXT"])
+            .output()
+            // dig itself missing cannot be fixed by retrying.
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().next() {
+            let line = line.trim();
+            if !line.is_empty() {
+                return Some(line.trim_matches('"').to_string());
+            }
+        }
     }
+    None
 }
 
 #[cfg(test)]
