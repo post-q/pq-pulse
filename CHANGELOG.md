@@ -1,4 +1,9 @@
 # Changelog
+## 0.7.6 - 2026-11-21
+
+### Bug Fixes
+- Dns txt queries fall back to dns-over-https
+
 ## 0.7.5 - 2026-11-21
 
 ### Bug Fixes
@@ -53,9 +58,24 @@
 - Introduce SEMANTIC_REASONING_API_KEY
 
 ### Documentation
-- Update README.md
-- Update README.md
 - Update readme
+- Update README.md
+
+### Features
+- Integrate semantic reasoning
+
+### Miscellaneous Tasks
+- Release pq-pulse version 0.6.0
+
+### Other
+- Ci fix
+- Dont run acc tests
+- Run acc tests
+
+## 0.5.2 - 2026-11-18
+
+### Documentation
+- Update README.md
 - Update README.md
 
 ### Features
@@ -64,7 +84,6 @@
 - Improve batch scanning
 - Add proper --help cli opt
 - Add --web-only opt
-- Integrate semantic reasoning
 
 ### Miscellaneous Tasks
 - Release pq-pulse version 0.5.0
@@ -73,13 +92,9 @@
 - Add release.toml with git-cliff
 - Bump the actions group across 1 directory with 3 updates
 - Release pq-pulse version 0.5.2
-- Release pq-pulse version 0.6.0
 
 ### Other
 - Merge pull request #3 from post-q/dependabot/github_actions/actions-646988e673
-- Ci fix
-- Dont run acc tests
-- Run acc tests
 
 ## 0.4.0 - 2026-09-21
 
