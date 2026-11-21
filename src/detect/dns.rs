@@ -1,10 +1,16 @@
 use std::net::{IpAddr, ToSocketAddrs};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::model::MxRecord;
 
 /// CNAME chains longer than this are cut off (loop guard).
 const MAX_CNAME_HOPS: usize = 8;
+
+/// DNS-over-HTTPS endpoint for when the local resolver cannot answer.
+/// Some VPS resolvers SERVFAIL third-party zones (observed: Team Cymru)
+/// and block external UDP/53, while HTTPS egress keeps working.
+const DOH_URL: &str = "https://cloudflare-dns.com/dns-query";
 
 pub(crate) fn resolve(host: &str) -> Option<IpAddr> {
     (host, 443)
@@ -116,11 +122,14 @@ pub(crate) fn dig_txt(name: &str) -> Option<String> {
     // One lost UDP packet or a resolver hiccup must not drop the
     // evidence, so the query retries once; every attempt is bounded.
     for _ in 0..2 {
-        let output = Command::new("dig")
+        let output = match Command::new("dig")
             .args(["+short", "+time=3", "+tries=1", name, "TXT"])
             .output()
-            // dig itself missing cannot be fixed by retrying.
-            .ok()?;
+        {
+            Ok(output) => output,
+            // dig itself missing: no local answer is possible.
+            Err(_) => break,
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(line) = stdout.lines().next() {
             let line = line.trim();
@@ -129,7 +138,31 @@ pub(crate) fn dig_txt(name: &str) -> Option<String> {
             }
         }
     }
-    None
+    doh_txt(name)
+}
+
+/// First TXT record over DNS-over-HTTPS JSON, same data dig would print
+/// (`"…"`, quotes included); `None` on transport, parse or NODATA.
+fn doh_txt(name: &str) -> Option<String> {
+    let response = ureq::get(DOH_URL)
+        .timeout(Duration::from_secs(3))
+        .set("accept", "application/dns-json")
+        .query("name", name)
+        .query("type", "TXT")
+        .call()
+        .ok()?;
+    let body = response.into_string().ok()?;
+    doh_record(&body)
+}
+
+/// The first Answer record of a DoH JSON response, quote-trimmed.
+fn doh_record(body: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+    let record = parsed["Answer"].as_array()?.iter().find_map(|row| {
+        let data = row["data"].as_str()?;
+        (!data.is_empty()).then(|| data.to_string())
+    })?;
+    Some(record.trim_matches('"').to_string())
 }
 
 #[cfg(test)]
@@ -219,5 +252,21 @@ mod tests {
                 host: "mx.example.com".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn doh_record_extracts_the_first_answer() {
+        let body = r#"{"Status":0,"Answer":[{"name":"242.126.30.185.origin.asn.cymru.com","type":16,"TTL":14400,"data":"\"20853 | 185.30.124.0/22 | PL | ripencc | 2013-07-10\""}]}"#;
+        assert_eq!(
+            doh_record(body).as_deref(),
+            Some("20853 | 185.30.124.0/22 | PL | ripencc | 2013-07-10")
+        );
+    }
+
+    #[test]
+    fn doh_record_yields_none_without_answers() {
+        assert_eq!(doh_record(r#"{"Status":3,"Question":[]}"#), None);
+        assert_eq!(doh_record(r#"{"Status":0,"Answer":[]}"#), None);
+        assert_eq!(doh_record("not json"), None);
     }
 }
